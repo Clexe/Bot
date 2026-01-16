@@ -1,0 +1,139 @@
+import os
+import ccxt
+import pandas as pd
+import pytz
+import asyncio
+import requests
+from datetime import datetime, time
+from telegram import Bot
+
+# ===============================
+# ENVIRONMENT VARIABLES (Railway)
+# ===============================
+TELEGRAM_TOKEN = os.getenv("8390361241:AAFWYrsi8_ojMrhPl9ngpP80t1M1kvEVhDc")
+CHAT_ID = os.getenv("8390361241")
+
+if not TELEGRAM_TOKEN or not CHAT_ID:
+    raise RuntimeError("Missing TELEGRAM_TOKEN or CHAT_ID environment variables")
+
+bot = Bot(token=TELEGRAM_TOKEN)
+
+# ===============================
+# EXCHANGE
+# ===============================
+exchange = ccxt.binance({"enableRateLimit": True})
+
+# ===============================
+# SETTINGS
+# ===============================
+UTC = pytz.UTC
+SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+HTF = "1h"
+LTF = "5m"
+
+COIN_CONFIG = {
+    "BTC/USDT": {"rr": 2.5},
+    "ETH/USDT": {"rr": 2.2},
+    "SOL/USDT": {"rr": 2.8},
+}
+
+open_trades = set()
+
+# ===============================
+# HELPERS
+# ===============================
+def fetch(symbol, tf, limit=200):
+    ohlc = exchange.fetch_ohlcv(symbol, tf, limit=limit)
+    return pd.DataFrame(
+        ohlc,
+        columns=["time", "open", "high", "low", "close", "volume"]
+    )
+
+def in_killzone():
+    now = datetime.now(UTC).time()
+    return (
+        time(7, 0) <= now <= time(10, 0) or
+        time(12, 0) <= now <= time(15, 0)
+    )
+
+def high_impact_news():
+    try:
+        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+        events = requests.get(url, timeout=5).json()
+        now = datetime.utcnow()
+        for e in events:
+            if e["impact"] == "High" and any(x in e["title"] for x in ["CPI", "FOMC", "NFP"]):
+                event_time = datetime.fromisoformat(e["date"].replace("Z", ""))
+                if abs((event_time - now).total_seconds()) < 3600:
+                    return True
+    except:
+        pass
+    return False
+
+def htf_bias(df):
+    if df.high.iloc[-1] > df.high.iloc[-2] and df.low.iloc[-1] > df.low.iloc[-2]:
+        return "BUY"
+    if df.high.iloc[-1] < df.high.iloc[-2] and df.low.iloc[-1] < df.low.iloc[-2]:
+        return "SELL"
+    return None
+
+def detect_fvg(df):
+    c1, c2, c3 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+    if c1.high < c3.low:
+        return (c1.high + c3.low) / 2
+    if c1.low > c3.high:
+        return (c1.low + c3.high) / 2
+    return None
+
+# ===============================
+# MAIN LOOP
+# ===============================
+async def run():
+    while True:
+        try:
+            if not in_killzone() or high_impact_news():
+                await asyncio.sleep(60)
+                continue
+
+            for symbol in SYMBOLS:
+                if symbol in open_trades:
+                    continue
+
+                htf = fetch(symbol, HTF)
+                bias = htf_bias(htf)
+                if not bias:
+                    continue
+
+                ltf = fetch(symbol, LTF)
+                fvg = detect_fvg(ltf)
+                if not fvg:
+                    continue
+
+                price = ltf.close.iloc[-1]
+                sl = ltf.low.iloc[-1] if bias == "BUY" else ltf.high.iloc[-1]
+                rr = COIN_CONFIG[symbol]["rr"]
+                tp = price + (price - sl) * rr if bias == "BUY" else price - (sl - price) * rr
+
+                open_trades.add(symbol)
+
+                await bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=(
+                        "📌 SMC + MSNR ALERT\n\n"
+                        f"Pair: {symbol}\n"
+                        f"Direction: {bias}\n"
+                        f"Entry (FVG): {round(fvg, 2)}\n"
+                        f"SL: {round(sl, 2)}\n"
+                        f"TP: {round(tp, 2)}\n"
+                        f"Session: {'London' if datetime.now(UTC).hour < 11 else 'New York'}"
+                    )
+                )
+
+            await asyncio.sleep(60)
+
+        except Exception as e:
+            print("ERROR:", e)
+            await asyncio.sleep(30)
+
+if __name__ == "__main__":
+    asyncio.run(run())
