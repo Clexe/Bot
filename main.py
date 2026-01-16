@@ -89,6 +89,8 @@ def detect_fvg(df):
 # MAIN LOOP
 # ===============================
 async def run():
+    await bot.send_message(chat_id=CHAT_ID, text="✅ Bot started successfully")
+
     while True:
         try:
             if not in_killzone() or high_impact_news():
@@ -137,3 +139,4 @@ async def run():
 
 if __name__ == "__main__":
     asyncio.run(run())
+
