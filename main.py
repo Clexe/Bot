@@ -1,24 +1,22 @@
 import os
-import time as pytime
 import asyncio
 import json
 import requests
 from datetime import datetime, time, timedelta
-
 import pytz
 import pandas as pd
 import ccxt
 from telegram import Bot
+from telegram.ext import Updater
 
 # =========================
 # ENV (Railway Variables)
 # =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-DEBUG = os.getenv("DEBUG", "0") == "1"
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("Missing TELEGRAM_TOKEN environment variable")
 
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise RuntimeError("Missing TELEGRAM_TOKEN or CHAT_ID environment variables")
+bot = Bot(token=TELEGRAM_TOKEN)
 
 # =========================
 # SETTINGS
@@ -53,12 +51,28 @@ FVG_LOOKBACK = int(os.getenv("FVG_LOOKBACK", "80"))  # 80 x 5m = ~6.5 hours
 # EXCHANGE + TELEGRAM
 # =========================
 exchange = ccxt.binance({"enableRateLimit": True})
-bot = Bot(token=TELEGRAM_TOKEN)
+
+# =========================
+# To get CHAT_ID dynamically
+# =========================
+def get_chat_id():
+    """
+    This function prints out the latest updates and chat IDs to find the correct CHAT_ID for messaging.
+    """
+    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+
+    updates = dispatcher.bot.get_updates()  # fetch updates to get messages and chat IDs
+    for update in updates:
+        print(f"Update: {update.message}")
+        print(f"Chat ID: {update.message.chat_id}")
+
+# Run this function to print out the correct chat_id.
+get_chat_id()  # This will print chat ID info to the logs
 
 # =========================
 # STATE
 # =========================
-# open_trades[symbol] = {"time": datetime_utc, "direction": "BUY"/"SELL", "entry": float, ...}
 open_trades = {}
 
 STATS_FILE = "stats.json"
