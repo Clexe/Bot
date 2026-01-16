@@ -10,8 +10,8 @@ from telegram import Bot
 # ===============================
 # ENVIRONMENT VARIABLES (Railway)
 # ===============================
-TELEGRAM_TOKEN = os.getenv("8390361241:AAFWYrsi8_ojMrhPl9ngpP80t1M1kvEVhDc")
-CHAT_ID = os.getenv("8390361241")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
     raise RuntimeError("Missing TELEGRAM_TOKEN or CHAT_ID environment variables")
@@ -89,8 +89,6 @@ def detect_fvg(df):
 # MAIN LOOP
 # ===============================
 async def run():
-    await bot.send_message(chat_id=CHAT_ID, text="✅ Bot started successfully")
-    
     while True:
         try:
             if not in_killzone() or high_impact_news():
@@ -139,5 +137,3 @@ async def run():
 
 if __name__ == "__main__":
     asyncio.run(run())
-
-
