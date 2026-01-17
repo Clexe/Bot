@@ -397,4 +397,11 @@ def kb_sessions(current: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]
     ])
 
-def kb_settings(cfg: Dict
+def kb_settings(cfg: Dict[str, Any]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⏱ Scan: {cfg['scan_interval_sec']}s", callback_data="set:scan"),
+         InlineKeyboardButton(f"🧊 Cooldown: {cfg['cooldown_min']}m", callback_data="set:cooldown")],
+        [InlineKeyboardButton("📉 Set Spread Filter", callback_data="set:spread")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]
+    ])
+
