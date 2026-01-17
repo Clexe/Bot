@@ -1,4 +1,3 @@
-
 import os
 import json
 import asyncio
@@ -9,9 +8,20 @@ from typing import Dict, Any, Optional, Tuple
 import pytz
 import pandas as pd
 
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 # =========================
 # ENV
@@ -50,14 +60,11 @@ DEFAULT_USER = {
         "ny": ["12:00", "15:00"]
     },
 
-    # per-pair config
     "pair_config": {
-        # crypto
         "BTC/USD": {"rr": 2.3, "fvg_min_pct": 0.08, "near_entry_pct": 0.25, "max_spread_pct": 0.20},
         "ETH/USD": {"rr": 2.1, "fvg_min_pct": 0.10, "near_entry_pct": 0.30, "max_spread_pct": 0.25},
         "SOL/USD": {"rr": 2.4, "fvg_min_pct": 0.14, "near_entry_pct": 0.45, "max_spread_pct": 0.35},
 
-        # forex
         "EUR/USD": {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.08},
         "GBP/USD": {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.10},
         "USD/JPY": {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.10},
@@ -69,11 +76,13 @@ DEFAULT_USER = {
     }
 }
 
-RUNTIME_STATE: Dict[str, Dict[str, Any]] = {}  # per user cooldowns in memory
+# Runtime state per user (cooldowns + "what input are we expecting next")
+RUNTIME_STATE: Dict[str, Dict[str, Any]] = {}
 
+# Twelve Data caches
 TWELVE_CACHE = {
-    "forex_pairs": set(),     # {"EUR/USD", ...}
-    "crypto_pairs": set(),    # {"BTC/USD", ...}
+    "forex_pairs": set(),
+    "crypto_pairs": set(),
     "last_refresh": None
 }
 
@@ -83,6 +92,12 @@ TWELVE_CACHE = {
 def log(*args):
     if DEBUG:
         print("[DEBUG]", *args)
+
+def now_utc():
+    return datetime.now(UTC)
+
+async def to_thread(func, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
 
 def _load_users() -> Dict[str, Any]:
     try:
@@ -99,14 +114,19 @@ def get_user(users: Dict[str, Any], chat_id: str) -> Dict[str, Any]:
     if chat_id not in users:
         users[chat_id] = json.loads(json.dumps(DEFAULT_USER))  # deep copy
         _save_users(users)
-    RUNTIME_STATE.setdefault(chat_id, {"cooldowns": {}})
+    RUNTIME_STATE.setdefault(chat_id, {"cooldowns": {}, "awaiting": None})
     return users[chat_id]
 
-async def to_thread(func, *args, **kwargs):
-    return await asyncio.to_thread(func, *args, **kwargs)
+def set_awaiting(chat_id: str, kind: Optional[str], meta: Optional[Dict[str, Any]] = None):
+    RUNTIME_STATE.setdefault(chat_id, {"cooldowns": {}, "awaiting": None})
+    RUNTIME_STATE[chat_id]["awaiting"] = {"kind": kind, "meta": meta or {}}
 
-def now_utc():
-    return datetime.now(UTC)
+def get_awaiting(chat_id: str) -> Optional[Dict[str, Any]]:
+    return RUNTIME_STATE.setdefault(chat_id, {"cooldowns": {}, "awaiting": None}).get("awaiting")
+
+def clear_awaiting(chat_id: str):
+    RUNTIME_STATE.setdefault(chat_id, {"cooldowns": {}, "awaiting": None})
+    RUNTIME_STATE[chat_id]["awaiting"] = None
 
 # =========================
 # TWELVE DATA CLIENT
@@ -120,12 +140,6 @@ def twelve_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     return r.json()
 
 async def twelve_refresh_markets(force: bool = False) -> bool:
-    """
-    Auto-discovery:
-      - /forex_pairs => forex list
-      - /cryptocurrencies => crypto list (symbols like BTC/USD)
-    Cache refresh every 6 hours unless forced.
-    """
     now = now_utc()
     last = TWELVE_CACHE["last_refresh"]
     if (not force) and last and (now - last) < timedelta(hours=6) and TWELVE_CACHE["forex_pairs"]:
@@ -153,39 +167,30 @@ async def twelve_refresh_markets(force: bool = False) -> bool:
         TWELVE_CACHE["forex_pairs"] = fx_set
         TWELVE_CACHE["crypto_pairs"] = c_set
         TWELVE_CACHE["last_refresh"] = now
-        log("Twelve markets refreshed", len(fx_set), len(c_set))
+        log("Twelve refreshed", len(fx_set), len(c_set))
         return True
     except Exception as ex:
         log("twelve_refresh_markets error", ex)
         return False
 
 def normalize_symbol(raw: str) -> Optional[str]:
-    """
-    Accept:
-      EURUSD, EUR_USD, EUR/USD
-      BTCUSD, BTC/USD, BTC_USD
-    Normalize to:
-      XXX/YYY (3 letters each) OR BTC/USD style (3-5 letters left, 3-5 right)
-    """
     s = raw.strip().upper()
+
     if "/" in s:
         parts = s.split("/")
         if len(parts) == 2 and 2 <= len(parts[0]) <= 6 and 2 <= len(parts[1]) <= 6:
             return f"{parts[0]}/{parts[1]}"
         return None
+
     if "_" in s:
         parts = s.split("_")
         if len(parts) == 2 and 2 <= len(parts[0]) <= 6 and 2 <= len(parts[1]) <= 6:
             return f"{parts[0]}/{parts[1]}"
         return None
-    # handle EURUSD (6) or BTCUSD (6) or SOLUSD (6)
-    if len(s) in (6, 7, 8) and s.isalnum():
-        # best effort: split into two 3s for FX, or 3/3 for crypto like BTCUSD
-        # if length 6 => 3/3
-        if len(s) == 6:
-            return f"{s[:3]}/{s[3:]}"
-        # if longer, we can't safely split; user should use slash/underscore
-        return None
+
+    # EURUSD / BTCUSD
+    if len(s) == 6 and s.isalnum():
+        return f"{s[:3]}/{s[3:]}"
     return None
 
 def is_forex_symbol(sym: str) -> bool:
@@ -195,10 +200,6 @@ def is_crypto_symbol(sym: str) -> bool:
     return sym in TWELVE_CACHE["crypto_pairs"]
 
 async def fetch_timeseries(symbol: str, interval: str, outputsize: int = 250) -> pd.DataFrame:
-    """
-    interval: '5min', '1h'
-    returns df with ts, open, high, low, close
-    """
     def _fetch():
         data = twelve_get("time_series", {
             "symbol": symbol,
@@ -220,9 +221,6 @@ async def fetch_timeseries(symbol: str, interval: str, outputsize: int = 250) ->
     return await to_thread(_fetch)
 
 async def twelve_spread_pct(symbol: str) -> Optional[float]:
-    """
-    Uses /quote. If bid/ask exist, calculate spread%. If not, returns None.
-    """
     def _fetch():
         q = twelve_get("quote", {"symbol": symbol})
         bid = q.get("bid") or q.get("bid_price")
@@ -298,7 +296,6 @@ def find_swings(df, left=2, right=2):
     highs = df["high"].values
     lows = df["low"].values
     swing_highs, swing_lows = [], []
-
     for i in range(left, len(df) - right):
         win_h = highs[i-left:i+right+1]
         win_l = lows[i-left:i+right+1]
@@ -312,10 +309,8 @@ def htf_bias_from_structure(htf_df):
     sh, sl = find_swings(htf_df, left=2, right=2)
     if len(sh) < 2 or len(sl) < 2:
         return None
-
     (_, h1), (_, h2) = sh[-2], sh[-1]
     (_, l1), (_, l2) = sl[-2], sl[-1]
-
     if h2 > h1 and l2 > l1:
         return "BUY"
     if h2 < h1 and l2 < l1:
@@ -326,7 +321,6 @@ def scan_fvg(ltf_df, direction, min_gap_pct, lookback=80):
     n = len(ltf_df)
     start = max(2, n - lookback)
     best = None
-
     for i in range(start, n):
         c0 = ltf_df.iloc[i-2]
         c1 = ltf_df.iloc[i-1]
@@ -347,7 +341,6 @@ def scan_fvg(ltf_df, direction, min_gap_pct, lookback=80):
             gap_pct = ((gap_high - gap_low) / float(c1["close"])) * 100
             if gap_pct >= min_gap_pct:
                 best = {"mid": mid, "gap_pct": gap_pct}
-
     return best
 
 def recent_swing_sl(ltf_df, direction, lookback=14):
@@ -375,7 +368,7 @@ def set_pair_cfg(cfg: Dict[str, Any], symbol: str, updates: Dict[str, float]):
 # COOLDOWNS
 # =========================
 def cooldown_ok(chat_id: str, symbol: str, cooldown_min: int) -> bool:
-    state = RUNTIME_STATE.setdefault(chat_id, {"cooldowns": {}})
+    state = RUNTIME_STATE.setdefault(chat_id, {"cooldowns": {}, "awaiting": None})
     last = state["cooldowns"].get(symbol)
     if not last:
         return True
@@ -383,194 +376,329 @@ def cooldown_ok(chat_id: str, symbol: str, cooldown_min: int) -> bool:
     return now_utc() - last_dt >= timedelta(minutes=cooldown_min)
 
 def mark_cooldown(chat_id: str, symbol: str):
-    state = RUNTIME_STATE.setdefault(chat_id, {"cooldowns": {}})
+    state = RUNTIME_STATE.setdefault(chat_id, {"cooldowns": {}, "awaiting": None})
     state["cooldowns"][symbol] = now_utc().isoformat()
 
 # =========================
-# TELEGRAM COMMANDS
+# INLINE MENUS
 # =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def kb_main() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 My Pairs", callback_data="menu:pairs"),
+         InlineKeyboardButton("➕ Add", callback_data="menu:add")],
+        [InlineKeyboardButton("🗑 Remove", callback_data="menu:remove"),
+         InlineKeyboardButton("📈 Markets", callback_data="menu:markets")],
+        [InlineKeyboardButton("⏰ Sessions", callback_data="menu:sessions"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="menu:settings")],
+        [InlineKeyboardButton("ℹ️ Help", callback_data="menu:help")]
+    ])
+
+def kb_add() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Crypto", callback_data="add:crypto"),
+         InlineKeyboardButton("➕ Add Forex", callback_data="add:forex")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]
+    ])
+
+def kb_sessions(current: str) -> InlineKeyboardMarkup:
+    def mark(v): return "✅ " + v.upper() if current == v else v.upper()
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(mark("london"), callback_data="sess:london"),
+         InlineKeyboardButton(mark("ny"), callback_data="sess:ny"),
+         InlineKeyboardButton(mark("both"), callback_data="sess:both")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]
+    ])
+
+def kb_settings(cfg: Dict[str, Any]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⏱ Scan: {cfg['scan_interval_sec']}s", callback_data="set:scan"),
+         InlineKeyboardButton(f"🧊 Cooldown: {cfg['cooldown_min']}m", callback_data="set:cooldown")],
+        [InlineKeyboardButton("📉 Set Spread Filter", callback_data="set:spread")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]
+    ])
+
+def kb_remove_list(cfg: Dict[str, Any]) -> InlineKeyboardMarkup:
+    buttons = []
+    # show up to 12 buttons (6 crypto + 6 forex)
+    for sym in cfg["pairs_crypto"][:6]:
+        buttons.append([InlineKeyboardButton(f"🗑 {sym}", callback_data=f"rm:{sym}")])
+    for sym in cfg["pairs_forex"][:6]:
+        buttons.append([InlineKeyboardButton(f"🗑 {sym}", callback_data=f"rm:{sym}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
+    return InlineKeyboardMarkup(buttons)
+
+# =========================
+# TELEGRAM HANDLERS
+# =========================
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = _load_users()
     chat_id = str(update.effective_chat.id)
     cfg = get_user(users, chat_id)
-
     await twelve_refresh_markets(force=True)
+    clear_awaiting(chat_id)
 
-    msg = (
-        "🟢 *SMC Scanner is ON (Twelve Data for everything)*\n\n"
-        "Commands:\n"
-        "• /pairs\n"
-        "• /add BTC/USD (crypto)\n"
-        "• /add EUR_USD or EUR/USD or EURUSD (forex)\n"
-        "• /remove BTC/USD\n"
-        "• /setsession london|ny|both\n"
-        "• /setcooldown 60\n"
-        "• /setscan 60\n"
-        "• /setspread PAIR 0.10  (max spread %)\n"
-        "• /markets\n"
-        "• /help\n\n"
-        f"Session: *{cfg['session']}* | Scan: *{cfg['scan_interval_sec']}s* | Cooldown: *{cfg['cooldown_min']}m*\n\n"
-        "Note: Spread is only enforced if TwelveData returns bid/ask for that instrument."
+    ok, session_name = in_killzone(cfg)
+    status_line = f"Session window: {session_name} | News filter: {'ON' if high_impact_news_block() else 'OFF'}"
+
+    text = (
+        "🟢 *SMC Scanner is ON*\n\n"
+        f"{status_line}\n\n"
+        "Use the buttons below. You can still type commands if you want.\n"
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_main())
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await cmd_start(update, context)
 
-async def pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    users = _load_users()
+    chat_id = str(query.message.chat.id)
+    cfg = get_user(users, chat_id)
+
+    data = query.data
+
+    if data == "menu:main":
+        clear_awaiting(chat_id)
+        ok, session_name = in_killzone(cfg)
+        text = (
+            "🟢 *SMC Scanner is ON*\n\n"
+            f"Session window: {session_name}\n\n"
+            "Choose an option:"
+        )
+        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_main())
+
+    if data == "menu:pairs":
+        clear_awaiting(chat_id)
+        text = (
+            "📊 *Your Pairs*\n\n"
+            f"*Crypto:*\n" + ("\n".join(cfg["pairs_crypto"]) if cfg["pairs_crypto"] else "None") + "\n\n"
+            f"*Forex:*\n" + ("\n".join(cfg["pairs_forex"]) if cfg["pairs_forex"] else "None")
+        )
+        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_main())
+
+    if data == "menu:add":
+        clear_awaiting(chat_id)
+        text = (
+            "➕ *Add Market*\n\n"
+            "Pick Crypto or Forex.\n"
+            "You can also type a symbol directly (example: BTC/USD or EUR/USD)."
+        )
+        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_add())
+
+    if data == "menu:remove":
+        clear_awaiting(chat_id)
+        text = "🗑 *Remove Market*\n\nTap a pair to remove it."
+        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_remove_list(cfg))
+
+    if data == "menu:markets":
+        clear_awaiting(chat_id)
+        await twelve_refresh_markets(force=True)
+        text = (
+            "📈 *Markets Available (Twelve Data)*\n\n"
+            f"Forex pairs discovered: *{len(TWELVE_CACHE['forex_pairs'])}*\n"
+            f"Crypto pairs discovered: *{len(TWELVE_CACHE['crypto_pairs'])}*\n\n"
+            "Examples:\n"
+            "Forex: EUR/USD, GBP/USD, USD/JPY\n"
+            "Crypto: BTC/USD, ETH/USD, SOL/USD\n\n"
+            "Use ➕ Add to add symbols."
+        )
+        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_main())
+
+    if data == "menu:sessions":
+        clear_awaiting(chat_id)
+        text = "⏰ *Sessions*\n\nChoose when signals are allowed."
+        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_sessions(cfg["session"]))
+
+    if data == "menu:settings":
+        clear_awaiting(chat_id)
+        text = "⚙️ *Settings*\n\nTap to change."
+        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_settings(cfg))
+
+    if data == "menu:help":
+        clear_awaiting(chat_id)
+        text = (
+            "ℹ️ *Help*\n\n"
+            "This bot scans crypto + forex using SMC bias + Fair Value Gaps.\n"
+            "It sends alerts only (no auto trading).\n\n"
+            "Flow:\n"
+            "1) Add pairs\n"
+            "2) Choose session\n"
+            "3) Wait for alerts\n\n"
+            "Tip: Add symbols like BTC/USD or EUR/USD."
+        )
+        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_main())
+
+    # Add flows
+    if data == "add:crypto":
+        set_awaiting(chat_id, "add_symbol", {"kind": "crypto"})
+        return await query.edit_message_text(
+            "➕ *Add Crypto*\n\nSend a symbol like:\n`BTC/USD`\n`ETH/USD`\n\nType it now:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:add")]])
+        )
+
+    if data == "add:forex":
+        set_awaiting(chat_id, "add_symbol", {"kind": "forex"})
+        return await query.edit_message_text(
+            "➕ *Add Forex*\n\nSend a symbol like:\n`EUR/USD`\n`GBP/USD`\n`USD/JPY`\n\nType it now:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:add")]])
+        )
+
+    # Session selection
+    if data.startswith("sess:"):
+        chosen = data.split(":")[1]
+        cfg["session"] = chosen
+        users[chat_id] = cfg
+        _save_users(users)
+        clear_awaiting(chat_id)
+        text = f"✅ Session set to *{chosen.upper()}*"
+        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_sessions(cfg["session"]))
+
+    # Remove pair
+    if data.startswith("rm:"):
+        sym = data.split("rm:")[1]
+        if sym in cfg["pairs_crypto"]:
+            cfg["pairs_crypto"].remove(sym)
+        if sym in cfg["pairs_forex"]:
+            cfg["pairs_forex"].remove(sym)
+        users[chat_id] = cfg
+        _save_users(users)
+        clear_awaiting(chat_id)
+        text = f"🗑 Removed: *{sym}*"
+        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_remove_list(cfg))
+
+    # Settings flows
+    if data == "set:scan":
+        set_awaiting(chat_id, "set_scan", {})
+        return await query.edit_message_text(
+            "⏱ *Set Scan Interval*\n\nSend seconds (min 15). Example:\n`60`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")]])
+        )
+
+    if data == "set:cooldown":
+        set_awaiting(chat_id, "set_cooldown", {})
+        return await query.edit_message_text(
+            "🧊 *Set Cooldown*\n\nSend minutes (min 1). Example:\n`90`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")]])
+        )
+
+    if data == "set:spread":
+        set_awaiting(chat_id, "set_spread_symbol", {})
+        return await query.edit_message_text(
+            "📉 *Spread Filter*\n\nFirst send the symbol you want to configure.\nExample:\n`EUR/USD` or `BTC/USD`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")]])
+        )
+
+
+async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
     users = _load_users()
     chat_id = str(update.effective_chat.id)
     cfg = get_user(users, chat_id)
-
-    crypto = "\n".join(cfg["pairs_crypto"]) or "None"
-    fx = "\n".join(cfg["pairs_forex"]) or "None"
-    await update.message.reply_text(
-        f"*Crypto (Twelve):*\n{crypto}\n\n*Forex (Twelve):*\n{fx}",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def markets(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await twelve_refresh_markets(force=True)
-
-    fx_count = len(TWELVE_CACHE["forex_pairs"])
-    c_count = len(TWELVE_CACHE["crypto_pairs"])
-
-    examples_fx = [s for s in ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"] if s in TWELVE_CACHE["forex_pairs"]]
-    examples_c = [s for s in ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"] if s in TWELVE_CACHE["crypto_pairs"]]
-
-    msg = (
-        "📊 *Markets availability (Twelve Data)*\n\n"
-        f"*Forex pairs discovered:* {fx_count}\n"
-        f"*Crypto pairs discovered:* {c_count}\n\n"
-        f"*Forex examples:* {', '.join(examples_fx) if examples_fx else 'N/A'}\n"
-        f"*Crypto examples:* {', '.join(examples_c) if examples_c else 'N/A'}\n\n"
-        "Add pairs with /add\n"
-        "Set max spread with /setspread PAIR PCT"
-    )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-async def add_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Usage: /add BTC/USD  or  /add EUR_USD")
-
-    raw = context.args[0].strip()
     await twelve_refresh_markets()
 
-    sym = normalize_symbol(raw)
-    if not sym:
-        return await update.message.reply_text("❌ Invalid symbol format. Try BTC/USD or EUR_USD or EUR/USD")
+    awaiting = get_awaiting(chat_id)
+    text = update.message.text.strip()
 
-    users = _load_users()
-    chat_id = str(update.effective_chat.id)
-    cfg = get_user(users, chat_id)
+    # If nothing is awaited, treat as "quick add"
+    if not awaiting or not awaiting.get("kind"):
+        sym = normalize_symbol(text)
+        if not sym:
+            return await update.message.reply_text("I didn’t understand that. Use buttons or type like BTC/USD or EUR/USD.", reply_markup=kb_main())
+        return await do_add_symbol(update, users, chat_id, cfg, sym)
 
+    kind = awaiting["kind"]
+    meta = awaiting.get("meta", {})
+
+    if kind == "add_symbol":
+        sym = normalize_symbol(text)
+        if not sym:
+            return await update.message.reply_text("Invalid symbol. Try like BTC/USD or EUR/USD.", reply_markup=kb_main())
+
+        intended = meta.get("kind")
+        if intended == "crypto" and not is_crypto_symbol(sym):
+            return await update.message.reply_text("That doesn’t look like a supported crypto symbol. Try BTC/USD.", reply_markup=kb_main())
+        if intended == "forex" and not is_forex_symbol(sym):
+            return await update.message.reply_text("That doesn’t look like a supported forex symbol. Try EUR/USD.", reply_markup=kb_main())
+
+        clear_awaiting(chat_id)
+        return await do_add_symbol(update, users, chat_id, cfg, sym)
+
+    if kind == "set_scan":
+        try:
+            sec = int(text)
+            cfg["scan_interval_sec"] = max(15, sec)
+            users[chat_id] = cfg
+            _save_users(users)
+            clear_awaiting(chat_id)
+            return await update.message.reply_text(f"✅ Scan interval set to {cfg['scan_interval_sec']}s", reply_markup=kb_settings(cfg))
+        except:
+            return await update.message.reply_text("Send a number like 60.")
+
+    if kind == "set_cooldown":
+        try:
+            minutes = int(text)
+            cfg["cooldown_min"] = max(1, minutes)
+            users[chat_id] = cfg
+            _save_users(users)
+            clear_awaiting(chat_id)
+            return await update.message.reply_text(f"✅ Cooldown set to {cfg['cooldown_min']} minutes", reply_markup=kb_settings(cfg))
+        except:
+            return await update.message.reply_text("Send a number like 90.")
+
+    if kind == "set_spread_symbol":
+        sym = normalize_symbol(text)
+        if not sym:
+            return await update.message.reply_text("Invalid symbol. Example: EUR/USD or BTC/USD.")
+        if (sym not in cfg["pairs_crypto"]) and (sym not in cfg["pairs_forex"]):
+            return await update.message.reply_text("Add the pair first (Add menu), then set spread.")
+        set_awaiting(chat_id, "set_spread_value", {"symbol": sym})
+        return await update.message.reply_text(f"Now send max spread % for {sym}. Example: 0.10")
+
+    if kind == "set_spread_value":
+        sym = meta.get("symbol")
+        try:
+            pct = float(text)
+            if not sym:
+                clear_awaiting(chat_id)
+                return await update.message.reply_text("Something went wrong, try again.", reply_markup=kb_main())
+            set_pair_cfg(cfg, sym, {"max_spread_pct": max(0.001, pct)})
+            users[chat_id] = cfg
+            _save_users(users)
+            clear_awaiting(chat_id)
+            return await update.message.reply_text(f"✅ Max spread for {sym} set to {pct}%", reply_markup=kb_settings(cfg))
+        except:
+            return await update.message.reply_text("Send a number like 0.10")
+
+
+async def do_add_symbol(update: Update, users: Dict[str, Any], chat_id: str, cfg: Dict[str, Any], sym: str):
+    # Validate against discovered lists
     if is_crypto_symbol(sym):
         if sym not in cfg["pairs_crypto"]:
             cfg["pairs_crypto"].append(sym)
         cfg["pair_config"].setdefault(sym, cfg["defaults"]["crypto"].copy())
+        users[chat_id] = cfg
         _save_users(users)
-        return await update.message.reply_text(f"✅ Added crypto: {sym}")
+        return await update.message.reply_text(f"✅ Added crypto: {sym}", reply_markup=kb_main())
 
     if is_forex_symbol(sym):
         if sym not in cfg["pairs_forex"]:
             cfg["pairs_forex"].append(sym)
         cfg["pair_config"].setdefault(sym, cfg["defaults"]["forex"].copy())
+        users[chat_id] = cfg
         _save_users(users)
-        return await update.message.reply_text(f"✅ Added forex: {sym}")
+        return await update.message.reply_text(f"✅ Added forex: {sym}", reply_markup=kb_main())
 
-    return await update.message.reply_text("❌ Symbol not found in Twelve Data market lists. Use /markets to confirm.")
-
-async def remove_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Usage: /remove BTC/USD  or  /remove EUR/USD")
-
-    raw = context.args[0].strip()
-    sym = normalize_symbol(raw) or raw.strip().upper()
-
-    users = _load_users()
-    chat_id = str(update.effective_chat.id)
-    cfg = get_user(users, chat_id)
-
-    if sym in cfg["pairs_crypto"]:
-        cfg["pairs_crypto"].remove(sym)
-        _save_users(users)
-        return await update.message.reply_text(f"🗑 Removed crypto: {sym}")
-
-    if sym in cfg["pairs_forex"]:
-        cfg["pairs_forex"].remove(sym)
-        _save_users(users)
-        return await update.message.reply_text(f"🗑 Removed forex: {sym}")
-
-    await update.message.reply_text("Pair not found in your list.")
-
-async def setsession(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Usage: /setsession london|ny|both")
-
-    val = context.args[0].strip().lower()
-    if val not in ["london", "ny", "both"]:
-        return await update.message.reply_text("Pick one: london, ny, both")
-
-    users = _load_users()
-    chat_id = str(update.effective_chat.id)
-    cfg = get_user(users, chat_id)
-    cfg["session"] = val
-    _save_users(users)
-    await update.message.reply_text(f"✅ Session set to: {val}")
-
-async def setcooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Usage: /setcooldown 60")
-    try:
-        minutes = int(context.args[0])
-    except:
-        return await update.message.reply_text("Cooldown must be a number (minutes).")
-
-    users = _load_users()
-    chat_id = str(update.effective_chat.id)
-    cfg = get_user(users, chat_id)
-    cfg["cooldown_min"] = max(1, minutes)
-    _save_users(users)
-    await update.message.reply_text(f"✅ Cooldown set to: {cfg['cooldown_min']} minutes")
-
-async def setscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Usage: /setscan 60")
-    try:
-        sec = int(context.args[0])
-    except:
-        return await update.message.reply_text("Scan interval must be a number (seconds).")
-
-    users = _load_users()
-    chat_id = str(update.effective_chat.id)
-    cfg = get_user(users, chat_id)
-    cfg["scan_interval_sec"] = max(15, sec)
-    _save_users(users)
-    await update.message.reply_text(f"✅ Scan interval set to: {cfg['scan_interval_sec']} seconds")
-
-async def setspread(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        return await update.message.reply_text("Usage: /setspread PAIR 0.10  (percent)")
-    raw = context.args[0].strip()
-    sym = normalize_symbol(raw) or raw.strip().upper()
-
-    try:
-        pct = float(context.args[1])
-    except:
-        return await update.message.reply_text("Spread must be a number. Example: /setspread EUR/USD 0.08")
-
-    users = _load_users()
-    chat_id = str(update.effective_chat.id)
-    cfg = get_user(users, chat_id)
-
-    if (sym not in cfg["pairs_crypto"]) and (sym not in cfg["pairs_forex"]):
-        return await update.message.reply_text("Add the pair first with /add, then set spread.")
-
-    # determine kind
-    kind = "crypto" if sym in cfg["pairs_crypto"] else "forex"
-    set_pair_cfg(cfg, sym, {"max_spread_pct": max(0.001, pct)})
-    _save_users(users)
-    await update.message.reply_text(f"✅ Max spread for {sym} set to {pct}% ({kind})")
+    return await update.message.reply_text("❌ Symbol not found in Twelve Data lists. Tap 📈 Markets to confirm.", reply_markup=kb_main())
 
 # =========================
 # SCANNER LOOP
@@ -579,20 +707,18 @@ async def scan_for_user(app: Application, chat_id: str, cfg: dict):
     ok, session_name = in_killzone(cfg)
     if not ok:
         return
-
     if high_impact_news_block():
         return
 
-    # ---- CRYPTO ----
+    # Crypto scan
     for sym in cfg["pairs_crypto"]:
         if not cooldown_ok(chat_id, sym, cfg["cooldown_min"]):
             continue
 
         pconf = pair_cfg(cfg, sym, "crypto")
         max_spread = float(pconf.get("max_spread_pct", cfg["defaults"]["crypto"]["max_spread_pct"]))
-        sp = await twelve_spread_pct(sym)  # often None
+        sp = await twelve_spread_pct(sym)
         if sp is not None and sp > max_spread:
-            log("Crypto spread blocked", sym, sp, ">", max_spread)
             continue
 
         try:
@@ -631,15 +757,14 @@ async def scan_for_user(app: Application, chat_id: str, cfg: dict):
                 f"SL: `{sl:.4f}`\n"
                 f"TP: `{tp:.4f}`\n"
             )
-
             await app.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=ParseMode.MARKDOWN)
             mark_cooldown(chat_id, sym)
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.8)
 
         except Exception as ex:
             log("Crypto scan error", chat_id, sym, ex)
 
-    # ---- FOREX ----
+    # Forex scan
     for sym in cfg["pairs_forex"]:
         if not cooldown_ok(chat_id, sym, cfg["cooldown_min"]):
             continue
@@ -648,7 +773,6 @@ async def scan_for_user(app: Application, chat_id: str, cfg: dict):
         max_spread = float(pconf.get("max_spread_pct", cfg["defaults"]["forex"]["max_spread_pct"]))
         sp = await twelve_spread_pct(sym)
         if sp is not None and sp > max_spread:
-            log("Forex spread blocked", sym, sp, ">", max_spread)
             continue
 
         try:
@@ -687,17 +811,15 @@ async def scan_for_user(app: Application, chat_id: str, cfg: dict):
                 f"SL: `{sl:.5f}`\n"
                 f"TP: `{tp:.5f}`\n"
             )
-
             await app.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=ParseMode.MARKDOWN)
             mark_cooldown(chat_id, sym)
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.8)
 
         except Exception as ex:
             log("Forex scan error", chat_id, sym, ex)
 
 async def background_scanner(app: Application):
     await twelve_refresh_markets(force=True)
-
     while True:
         try:
             users = _load_users()
@@ -716,19 +838,17 @@ async def background_scanner(app: Application):
 async def on_startup(app: Application):
     asyncio.create_task(background_scanner(app))
 
+# =========================
+# BUILD APP
+# =========================
 def build_app():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("pairs", pairs))
-    app.add_handler(CommandHandler("markets", markets))
-    app.add_handler(CommandHandler("add", add_pair))
-    app.add_handler(CommandHandler("remove", remove_pair))
-    app.add_handler(CommandHandler("setsession", setsession))
-    app.add_handler(CommandHandler("setcooldown", setcooldown))
-    app.add_handler(CommandHandler("setscan", setscan))
-    app.add_handler(CommandHandler("setspread", setspread))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+
+    app.add_handler(CallbackQueryHandler(menu_router))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input_handler))
 
     app.post_init = on_startup
     return app
