@@ -397,4 +397,4 @@ def kb_sessions(current: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]
     ])
 
-def kb_settings(cfg: Dict[str, Any]) -> InlineKeyboard
+def kb_settings(cfg: Dict[str, Any]) -> InlineKeyboard:
