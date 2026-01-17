@@ -64,7 +64,8 @@ DEFAULT_USER = {
         "BTC/USD": {"rr": 2.3, "fvg_min_pct": 0.08, "near_entry_pct": 0.25, "max_spread_pct": 0.20},
         "ETH/USD": {"rr": 2.1, "fvg_min_pct": 0.10, "near_entry_pct": 0.30, "max_spread_pct": 0.25},
         "SOL/USD": {"rr": 2.4, "fvg_min_pct": 0.14, "near_entry_pct": 0.45, "max_spread_pct": 0.35},
-
+        "XAU/USD": {"rr": 2.0, "fvg_min_pct": 0.20, "near_entry_pct": 0.25, "max_spread_pct": 0.30},  # Gold
+        "XAG/USD": {"rr": 2.1, "fvg_min_pct": 0.20, "near_entry_pct": 0.30, "max_spread_pct": 0.30},  # Silver
         "EUR/USD": {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.08},
         "GBP/USD": {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.10},
         "USD/JPY": {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.10},
@@ -275,7 +276,14 @@ def high_impact_news_block() -> bool:
     try:
         url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
         events = requests.get(url, timeout=5).json()
-        now = datetime.utcnow()
+
+        # Check if the response is empty
+        if not events:
+            log("Empty response from news API.")
+            return False
+
+        now = datetime.utcnow().replace(tzinfo=UTC)  # Make sure 'now' is timezone-aware
+
         for e in events:
             if e.get("impact") != "High":
                 continue
@@ -283,11 +291,14 @@ def high_impact_news_block() -> bool:
             if not any(x in title for x in ["CPI", "FOMC", "NFP"]):
                 continue
             event_time = datetime.fromisoformat(e["date"].replace("Z", ""))
+            event_time = event_time.replace(tzinfo=UTC)
+
             if abs((event_time - now).total_seconds()) < 3600:
                 return True
     except Exception as ex:
         log("News filter error:", ex)
     return False
+
 
 # =========================
 # STRATEGY: STRUCTURE + FVG
