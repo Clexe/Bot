@@ -1,3 +1,4 @@
+
 import os
 import json
 import asyncio
@@ -7,7 +8,6 @@ from typing import Dict, Any, Optional, Tuple
 
 import pytz
 import pandas as pd
-import ccxt
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -19,8 +19,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
 DEBUG = os.getenv("DEBUG", "0") == "1"
-
-CRYPTO_EXCHANGE_ID = os.getenv("CRYPTO_EXCHANGE", "binance")  # for crypto candles + spread
 UTC = pytz.UTC
 
 if not BOT_TOKEN:
@@ -38,9 +36,9 @@ DATA_FILE = "users.json"
 DEFAULT_USER = {
     "enabled": True,
 
-    # user pairs (stored normalized)
-    "pairs_crypto": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],  # crypto uses CCXT symbols
-    "pairs_forex": ["EUR/USD"],  # forex uses Twelve Data symbols like EUR/USD
+    # Twelve Data symbols
+    "pairs_crypto": ["BTC/USD", "ETH/USD", "SOL/USD"],
+    "pairs_forex": ["EUR/USD", "GBP/USD", "USD/JPY"],
 
     "session": "both",  # london | ny | both
     "scan_interval_sec": 60,
@@ -52,29 +50,30 @@ DEFAULT_USER = {
         "ny": ["12:00", "15:00"]
     },
 
-    # per-pair config (spread filter included)
+    # per-pair config
     "pair_config": {
-        "BTC/USDT": {"rr": 2.3, "fvg_min_pct": 0.08, "near_entry_pct": 0.25, "max_spread_pct": 0.08},
-        "ETH/USDT": {"rr": 2.1, "fvg_min_pct": 0.10, "near_entry_pct": 0.30, "max_spread_pct": 0.10},
-        "SOL/USDT": {"rr": 2.4, "fvg_min_pct": 0.14, "near_entry_pct": 0.45, "max_spread_pct": 0.18},
+        # crypto
+        "BTC/USD": {"rr": 2.3, "fvg_min_pct": 0.08, "near_entry_pct": 0.25, "max_spread_pct": 0.20},
+        "ETH/USD": {"rr": 2.1, "fvg_min_pct": 0.10, "near_entry_pct": 0.30, "max_spread_pct": 0.25},
+        "SOL/USD": {"rr": 2.4, "fvg_min_pct": 0.14, "near_entry_pct": 0.45, "max_spread_pct": 0.35},
 
-        # forex defaults per symbol if you want to override later
+        # forex
         "EUR/USD": {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.08},
+        "GBP/USD": {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.10},
+        "USD/JPY": {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.10},
     },
 
     "defaults": {
-        "crypto": {"rr": 2.2, "fvg_min_pct": 0.10, "near_entry_pct": 0.30, "max_spread_pct": 0.15},
-        "forex":  {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.08},
+        "crypto": {"rr": 2.2, "fvg_min_pct": 0.10, "near_entry_pct": 0.30, "max_spread_pct": 0.30},
+        "forex":  {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.10},
     }
 }
 
-# Runtime state (cooldowns) – in memory
-RUNTIME_STATE: Dict[str, Dict[str, Any]] = {}
+RUNTIME_STATE: Dict[str, Dict[str, Any]] = {}  # per user cooldowns in memory
 
-# Twelve Data caches
 TWELVE_CACHE = {
-    "forex_pairs": set(),   # {"EUR/USD", ...}
-    "cryptos": set(),       # {"BTC/USD", ...} (from /cryptocurrencies)
+    "forex_pairs": set(),     # {"EUR/USD", ...}
+    "crypto_pairs": set(),    # {"BTC/USD", ...}
     "last_refresh": None
 }
 
@@ -110,53 +109,7 @@ def now_utc():
     return datetime.now(UTC)
 
 # =========================
-# CRYPTO (CCXT)
-# =========================
-def build_exchange():
-    ex_class = getattr(ccxt, CRYPTO_EXCHANGE_ID, None)
-    if not ex_class:
-        raise RuntimeError(f"Unsupported CRYPTO_EXCHANGE: {CRYPTO_EXCHANGE_ID}")
-    return ex_class({"enableRateLimit": True, "timeout": 30000})
-
-CRYPTO_EXCHANGE = build_exchange()
-
-async def crypto_load_markets():
-    def _load():
-        CRYPTO_EXCHANGE.load_markets()
-        return True
-    return await to_thread(_load)
-
-def crypto_symbol_exists(symbol: str) -> bool:
-    try:
-        return symbol in CRYPTO_EXCHANGE.markets
-    except:
-        return False
-
-async def fetch_crypto_ohlcv(symbol: str, timeframe: str, limit: int = 250) -> pd.DataFrame:
-    def _fetch():
-        ohlc = CRYPTO_EXCHANGE.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df = pd.DataFrame(ohlc, columns=["ts", "open", "high", "low", "close", "vol"])
-        df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-        return df
-    return await to_thread(_fetch)
-
-async def crypto_spread_pct(symbol: str) -> Optional[float]:
-    def _tick():
-        t = CRYPTO_EXCHANGE.fetch_ticker(symbol)
-        bid = t.get("bid")
-        ask = t.get("ask")
-        if bid is None or ask is None or bid <= 0:
-            return None
-        mid = (bid + ask) / 2
-        return (ask - bid) / mid * 100.0
-    try:
-        return await to_thread(_tick)
-    except Exception as ex:
-        log("crypto_spread_pct error", symbol, ex)
-        return None
-
-# =========================
-# TWELVE DATA (FOREX + DISCOVERY)
+# TWELVE DATA CLIENT
 # =========================
 def twelve_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     params = dict(params)
@@ -169,8 +122,8 @@ def twelve_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
 async def twelve_refresh_markets(force: bool = False) -> bool:
     """
     Auto-discovery:
-      - forex pairs via /forex_pairs (daily updated)
-      - crypto list via /cryptocurrencies (daily updated)
+      - /forex_pairs => forex list
+      - /cryptocurrencies => crypto list (symbols like BTC/USD)
     Cache refresh every 6 hours unless forced.
     """
     now = now_utc()
@@ -178,17 +131,17 @@ async def twelve_refresh_markets(force: bool = False) -> bool:
     if (not force) and last and (now - last) < timedelta(hours=6) and TWELVE_CACHE["forex_pairs"]:
         return True
 
-    def _fetch_all():
-        forex = twelve_get("forex_pairs", {})
+    def _fetch():
+        fx = twelve_get("forex_pairs", {})
         fx_set = set()
-        for item in forex.get("data", []):
+        for item in fx.get("data", []):
             sym = (item.get("symbol") or "").upper()
             if "/" in sym:
                 fx_set.add(sym)
 
-        cryptos = twelve_get("cryptocurrencies", {})  # symbols like BTC/USD
+        cc = twelve_get("cryptocurrencies", {})
         c_set = set()
-        for item in cryptos.get("data", []):
+        for item in cc.get("data", []):
             sym = (item.get("symbol") or "").upper()
             if "/" in sym:
                 c_set.add(sym)
@@ -196,88 +149,87 @@ async def twelve_refresh_markets(force: bool = False) -> bool:
         return fx_set, c_set
 
     try:
-        fx_set, c_set = await to_thread(_fetch_all)
+        fx_set, c_set = await to_thread(_fetch)
         TWELVE_CACHE["forex_pairs"] = fx_set
-        TWELVE_CACHE["cryptos"] = c_set
+        TWELVE_CACHE["crypto_pairs"] = c_set
         TWELVE_CACHE["last_refresh"] = now
-        log("Twelve refreshed", "FX:", len(fx_set), "Crypto:", len(c_set))
+        log("Twelve markets refreshed", len(fx_set), len(c_set))
         return True
     except Exception as ex:
         log("twelve_refresh_markets error", ex)
         return False
 
-def twelve_forex_exists(symbol: str) -> bool:
-    return symbol.upper() in TWELVE_CACHE["forex_pairs"]
-
-def twelve_crypto_exists(symbol: str) -> bool:
-    return symbol.upper() in TWELVE_CACHE["cryptos"]
-
-def normalize_forex_symbol(raw: str) -> Optional[str]:
+def normalize_symbol(raw: str) -> Optional[str]:
     """
     Accept:
-      EUR_USD, EUR/USD, EURUSD
+      EURUSD, EUR_USD, EUR/USD
+      BTCUSD, BTC/USD, BTC_USD
     Normalize to:
-      EUR/USD
+      XXX/YYY (3 letters each) OR BTC/USD style (3-5 letters left, 3-5 right)
     """
     s = raw.strip().upper()
     if "/" in s:
         parts = s.split("/")
-        if len(parts) == 2 and len(parts[0]) == 3 and len(parts[1]) == 3:
+        if len(parts) == 2 and 2 <= len(parts[0]) <= 6 and 2 <= len(parts[1]) <= 6:
             return f"{parts[0]}/{parts[1]}"
         return None
     if "_" in s:
         parts = s.split("_")
-        if len(parts) == 2 and len(parts[0]) == 3 and len(parts[1]) == 3:
+        if len(parts) == 2 and 2 <= len(parts[0]) <= 6 and 2 <= len(parts[1]) <= 6:
             return f"{parts[0]}/{parts[1]}"
         return None
-    if len(s) == 6 and s.isalpha():
-        return f"{s[:3]}/{s[3:]}"
+    # handle EURUSD (6) or BTCUSD (6) or SOLUSD (6)
+    if len(s) in (6, 7, 8) and s.isalnum():
+        # best effort: split into two 3s for FX, or 3/3 for crypto like BTCUSD
+        # if length 6 => 3/3
+        if len(s) == 6:
+            return f"{s[:3]}/{s[3:]}"
+        # if longer, we can't safely split; user should use slash/underscore
+        return None
     return None
 
-async def fetch_twelve_timeseries(symbol: str, interval: str, outputsize: int = 250) -> pd.DataFrame:
+def is_forex_symbol(sym: str) -> bool:
+    return sym in TWELVE_CACHE["forex_pairs"]
+
+def is_crypto_symbol(sym: str) -> bool:
+    return sym in TWELVE_CACHE["crypto_pairs"]
+
+async def fetch_timeseries(symbol: str, interval: str, outputsize: int = 250) -> pd.DataFrame:
     """
-    Twelve Data candles:
-      interval examples: '5min', '1h'
-    Returns df with: ts, open, high, low, close
+    interval: '5min', '1h'
+    returns df with ts, open, high, low, close
     """
     def _fetch():
-        data = twelve_get("time_series", {"symbol": symbol, "interval": interval, "outputsize": outputsize, "timezone": "UTC"})
+        data = twelve_get("time_series", {
+            "symbol": symbol,
+            "interval": interval,
+            "outputsize": outputsize,
+            "timezone": "UTC"
+        })
         if data.get("status") != "ok":
-            # some errors come as {"status":"error","message":"..."}
             raise RuntimeError(data.get("message", "TwelveData error"))
 
-        values = data.get("values", [])
         rows = []
-        for v in values:
-            # datetime like "2025-02-28 14:30:00"
+        for v in data.get("values", []):
             ts = pd.to_datetime(v["datetime"], utc=True)
-            o = float(v["open"])
-            h = float(v["high"])
-            l = float(v["low"])
-            c = float(v["close"])
-            rows.append([ts, o, h, l, c])
+            rows.append([ts, float(v["open"]), float(v["high"]), float(v["low"]), float(v["close"])])
 
         df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close"])
-        df = df.sort_values("ts")  # ascending
-        return df
+        return df.sort_values("ts")
 
     return await to_thread(_fetch)
 
 async def twelve_spread_pct(symbol: str) -> Optional[float]:
     """
-    Twelve Data /quote often returns only 'price' for many instruments.
-    If bid/ask exists, compute spread%.
-    If not, returns None (spread not available from data feed).
+    Uses /quote. If bid/ask exist, calculate spread%. If not, returns None.
     """
     def _fetch():
         q = twelve_get("quote", {"symbol": symbol})
-        # try common fields
         bid = q.get("bid") or q.get("bid_price")
         ask = q.get("ask") or q.get("ask_price")
         if bid is None or ask is None:
             return None
-        bid = float(bid)
-        ask = float(ask)
+        bid = float(bid); ask = float(ask)
         if bid <= 0:
             return None
         mid = (bid + ask) / 2
@@ -442,16 +394,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     cfg = get_user(users, chat_id)
 
-    await crypto_load_markets()
-    await twelve_refresh_markets()
+    await twelve_refresh_markets(force=True)
 
     msg = (
-        "🟢 *SMC Scanner is ON*\n\n"
+        "🟢 *SMC Scanner is ON (Twelve Data for everything)*\n\n"
         "Commands:\n"
         "• /pairs\n"
-        "• /add BTC/USDT (crypto)\n"
+        "• /add BTC/USD (crypto)\n"
         "• /add EUR_USD or EUR/USD or EURUSD (forex)\n"
-        "• /remove BTC/USDT\n"
+        "• /remove BTC/USD\n"
         "• /setsession london|ny|both\n"
         "• /setcooldown 60\n"
         "• /setscan 60\n"
@@ -459,7 +410,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /markets\n"
         "• /help\n\n"
         f"Session: *{cfg['session']}* | Scan: *{cfg['scan_interval_sec']}s* | Cooldown: *{cfg['cooldown_min']}m*\n\n"
-        "Note: Crypto spread filter is real bid/ask via exchange. Forex spread may be unavailable (mid-price feed)."
+        "Note: Spread is only enforced if TwelveData returns bid/ask for that instrument."
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -473,29 +424,26 @@ async def pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     crypto = "\n".join(cfg["pairs_crypto"]) or "None"
     fx = "\n".join(cfg["pairs_forex"]) or "None"
-
     await update.message.reply_text(
-        f"*Crypto pairs:*\n{crypto}\n\n*Forex pairs:*\n{fx}",
+        f"*Crypto (Twelve):*\n{crypto}\n\n*Forex (Twelve):*\n{fx}",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def markets(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await crypto_load_markets()
     await twelve_refresh_markets(force=True)
 
-    crypto_count = len(CRYPTO_EXCHANGE.markets) if hasattr(CRYPTO_EXCHANGE, "markets") else 0
     fx_count = len(TWELVE_CACHE["forex_pairs"])
-    td_crypto_count = len(TWELVE_CACHE["cryptos"])
+    c_count = len(TWELVE_CACHE["crypto_pairs"])
+
+    examples_fx = [s for s in ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"] if s in TWELVE_CACHE["forex_pairs"]]
+    examples_c = [s for s in ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"] if s in TWELVE_CACHE["crypto_pairs"]]
 
     msg = (
-        "📊 *Markets availability*\n\n"
-        f"*Crypto exchange:* `{CRYPTO_EXCHANGE_ID}`\n"
-        f"*Crypto symbols loaded:* {crypto_count}\n\n"
-        f"*TwelveData forex pairs discovered:* {fx_count}\n"
-        f"*TwelveData crypto symbols discovered:* {td_crypto_count}\n\n"
-        "Examples:\n"
-        f"• Forex: EUR/USD, GBP/USD, USD/JPY\n"
-        f"• Crypto (CCXT): BTC/USDT, ETH/USDT\n\n"
+        "📊 *Markets availability (Twelve Data)*\n\n"
+        f"*Forex pairs discovered:* {fx_count}\n"
+        f"*Crypto pairs discovered:* {c_count}\n\n"
+        f"*Forex examples:* {', '.join(examples_fx) if examples_fx else 'N/A'}\n"
+        f"*Crypto examples:* {', '.join(examples_c) if examples_c else 'N/A'}\n\n"
         "Add pairs with /add\n"
         "Set max spread with /setspread PAIR PCT"
     )
@@ -503,65 +451,55 @@ async def markets(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        return await update.message.reply_text("Usage: /add BTC/USDT  or  /add EUR_USD")
+        return await update.message.reply_text("Usage: /add BTC/USD  or  /add EUR_USD")
 
     raw = context.args[0].strip()
+    await twelve_refresh_markets()
+
+    sym = normalize_symbol(raw)
+    if not sym:
+        return await update.message.reply_text("❌ Invalid symbol format. Try BTC/USD or EUR_USD or EUR/USD")
+
     users = _load_users()
     chat_id = str(update.effective_chat.id)
     cfg = get_user(users, chat_id)
 
-    # Crypto if it contains "/"
-    if "/" in raw and len(raw.split("/")) == 2 and len(raw.split("/")[0]) >= 2:
-        pair = raw.upper()
-
-        await crypto_load_markets()
-        if not crypto_symbol_exists(pair):
-            return await update.message.reply_text("❌ Crypto pair not found on exchange. Use /markets to check availability.")
-
-        if pair not in cfg["pairs_crypto"]:
-            cfg["pairs_crypto"].append(pair)
-
-        cfg["pair_config"].setdefault(pair, cfg["defaults"]["crypto"].copy())
+    if is_crypto_symbol(sym):
+        if sym not in cfg["pairs_crypto"]:
+            cfg["pairs_crypto"].append(sym)
+        cfg["pair_config"].setdefault(sym, cfg["defaults"]["crypto"].copy())
         _save_users(users)
-        return await update.message.reply_text(f"✅ Added crypto pair: {pair}")
+        return await update.message.reply_text(f"✅ Added crypto: {sym}")
 
-    # Otherwise treat as forex and normalize
-    await twelve_refresh_markets()
-    fx = normalize_forex_symbol(raw)
-    if not fx:
-        return await update.message.reply_text("❌ Invalid forex format. Try EUR_USD or EUR/USD or EURUSD")
+    if is_forex_symbol(sym):
+        if sym not in cfg["pairs_forex"]:
+            cfg["pairs_forex"].append(sym)
+        cfg["pair_config"].setdefault(sym, cfg["defaults"]["forex"].copy())
+        _save_users(users)
+        return await update.message.reply_text(f"✅ Added forex: {sym}")
 
-    if not twelve_forex_exists(fx):
-        return await update.message.reply_text("❌ Forex pair not found in TwelveData list. Use /markets and check spelling.")
-
-    if fx not in cfg["pairs_forex"]:
-        cfg["pairs_forex"].append(fx)
-
-    cfg["pair_config"].setdefault(fx, cfg["defaults"]["forex"].copy())
-    _save_users(users)
-    await update.message.reply_text(f"✅ Added forex pair: {fx}")
+    return await update.message.reply_text("❌ Symbol not found in Twelve Data market lists. Use /markets to confirm.")
 
 async def remove_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        return await update.message.reply_text("Usage: /remove BTC/USDT  or  /remove EUR/USD")
+        return await update.message.reply_text("Usage: /remove BTC/USD  or  /remove EUR/USD")
 
-    pair = context.args[0].strip().upper()
+    raw = context.args[0].strip()
+    sym = normalize_symbol(raw) or raw.strip().upper()
 
     users = _load_users()
     chat_id = str(update.effective_chat.id)
     cfg = get_user(users, chat_id)
 
-    if pair in cfg["pairs_crypto"]:
-        cfg["pairs_crypto"].remove(pair)
+    if sym in cfg["pairs_crypto"]:
+        cfg["pairs_crypto"].remove(sym)
         _save_users(users)
-        return await update.message.reply_text(f"🗑 Removed crypto pair: {pair}")
+        return await update.message.reply_text(f"🗑 Removed crypto: {sym}")
 
-    # normalize forex input if needed
-    fx = normalize_forex_symbol(pair) or pair
-    if fx in cfg["pairs_forex"]:
-        cfg["pairs_forex"].remove(fx)
+    if sym in cfg["pairs_forex"]:
+        cfg["pairs_forex"].remove(sym)
         _save_users(users)
-        return await update.message.reply_text(f"🗑 Removed forex pair: {fx}")
+        return await update.message.reply_text(f"🗑 Removed forex: {sym}")
 
     await update.message.reply_text("Pair not found in your list.")
 
@@ -613,27 +551,26 @@ async def setscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setspread(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         return await update.message.reply_text("Usage: /setspread PAIR 0.10  (percent)")
-    raw_pair = context.args[0].strip()
+    raw = context.args[0].strip()
+    sym = normalize_symbol(raw) or raw.strip().upper()
+
     try:
         pct = float(context.args[1])
     except:
-        return await update.message.reply_text("Spread must be a number. Example: /setspread BTC/USDT 0.10")
+        return await update.message.reply_text("Spread must be a number. Example: /setspread EUR/USD 0.08")
 
     users = _load_users()
     chat_id = str(update.effective_chat.id)
     cfg = get_user(users, chat_id)
 
-    # determine which list it belongs to
-    pair = raw_pair.upper()
-    fx = normalize_forex_symbol(raw_pair) or pair
-
-    if (pair not in cfg["pairs_crypto"]) and (fx not in cfg["pairs_forex"]):
+    if (sym not in cfg["pairs_crypto"]) and (sym not in cfg["pairs_forex"]):
         return await update.message.reply_text("Add the pair first with /add, then set spread.")
 
-    target = pair if pair in cfg["pairs_crypto"] else fx
-    set_pair_cfg(cfg, target, {"max_spread_pct": max(0.001, pct)})
+    # determine kind
+    kind = "crypto" if sym in cfg["pairs_crypto"] else "forex"
+    set_pair_cfg(cfg, sym, {"max_spread_pct": max(0.001, pct)})
     _save_users(users)
-    await update.message.reply_text(f"✅ Max spread for {target} set to {pct}%")
+    await update.message.reply_text(f"✅ Max spread for {sym} set to {pct}% ({kind})")
 
 # =========================
 # SCANNER LOOP
@@ -653,77 +590,18 @@ async def scan_for_user(app: Application, chat_id: str, cfg: dict):
 
         pconf = pair_cfg(cfg, sym, "crypto")
         max_spread = float(pconf.get("max_spread_pct", cfg["defaults"]["crypto"]["max_spread_pct"]))
-        sp = await crypto_spread_pct(sym)
-
-        # apply spread filter if we can calculate it
+        sp = await twelve_spread_pct(sym)  # often None
         if sp is not None and sp > max_spread:
             log("Crypto spread blocked", sym, sp, ">", max_spread)
             continue
 
         try:
-            htf = await fetch_crypto_ohlcv(sym, "1h", limit=250)
+            htf = await fetch_timeseries(sym, "1h", outputsize=250)
             bias = htf_bias_from_structure(htf)
             if not bias:
                 continue
 
-            ltf = await fetch_crypto_ohlcv(sym, "5m", limit=250)
-            fvg = scan_fvg(ltf, bias, float(pconf["fvg_min_pct"]), lookback=int(cfg["fvg_lookback"]))
-            if not fvg:
-                continue
-
-            price = float(ltf["close"].iloc[-1])
-            entry = float(fvg["mid"])
-            if not in_price_proximity(price, entry, float(pconf["near_entry_pct"])):
-                continue
-
-            sl = recent_swing_sl(ltf, bias, lookback=14)
-            risk = abs(entry - sl)
-            if risk <= 0:
-                continue
-
-            rr = float(pconf["rr"])
-            tp = entry + risk * rr if bias == "BUY" else entry - risk * rr
-
-            msg = (
-                f"📌 *SMC + FVG ALERT*\n\n"
-                f"Pair: *{sym}*\n"
-                f"Session: *{session_name}*\n"
-                f"Bias: *{bias}*\n"
-                f"FVG gap: *{fvg['gap_pct']:.2f}%*\n"
-                f"Spread: *{(sp if sp is not None else 0):.3f}%* (max {max_spread}%)\n\n"
-                f"Entry: `{entry:.4f}`\n"
-                f"SL: `{sl:.4f}`\n"
-                f"TP: `{tp:.4f}`\n"
-            )
-
-            await app.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=ParseMode.MARKDOWN)
-            mark_cooldown(chat_id, sym)
-            await asyncio.sleep(1)
-
-        except Exception as ex:
-            log("Crypto scan error", chat_id, sym, ex)
-
-    # ---- FOREX (Twelve Data candles) ----
-    for fx in cfg["pairs_forex"]:
-        if not cooldown_ok(chat_id, fx, cfg["cooldown_min"]):
-            continue
-
-        pconf = pair_cfg(cfg, fx, "forex")
-        max_spread = float(pconf.get("max_spread_pct", cfg["defaults"]["forex"]["max_spread_pct"]))
-        sp = await twelve_spread_pct(fx)  # may be None on many feeds
-
-        # Only enforce forex spread filter if bid/ask exists in quote response
-        if sp is not None and sp > max_spread:
-            log("Forex spread blocked", fx, sp, ">", max_spread)
-            continue
-
-        try:
-            htf = await fetch_twelve_timeseries(fx, "1h", outputsize=250)
-            bias = htf_bias_from_structure(htf)
-            if not bias:
-                continue
-
-            ltf = await fetch_twelve_timeseries(fx, "5min", outputsize=250)
+            ltf = await fetch_timeseries(sym, "5min", outputsize=250)
             fvg = scan_fvg(ltf, bias, float(pconf["fvg_min_pct"]), lookback=int(cfg["fvg_lookback"]))
             if not fvg:
                 continue
@@ -744,7 +622,63 @@ async def scan_for_user(app: Application, chat_id: str, cfg: dict):
             spread_line = f"{sp:.3f}% (max {max_spread}%)" if sp is not None else f"Unavailable (max {max_spread}%)"
             msg = (
                 f"📌 *SMC + FVG ALERT*\n\n"
-                f"Pair: *{fx}* (Forex)\n"
+                f"Pair: *{sym}* (Crypto)\n"
+                f"Session: *{session_name}*\n"
+                f"Bias: *{bias}*\n"
+                f"FVG gap: *{fvg['gap_pct']:.2f}%*\n"
+                f"Spread: *{spread_line}*\n\n"
+                f"Entry: `{entry:.4f}`\n"
+                f"SL: `{sl:.4f}`\n"
+                f"TP: `{tp:.4f}`\n"
+            )
+
+            await app.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=ParseMode.MARKDOWN)
+            mark_cooldown(chat_id, sym)
+            await asyncio.sleep(1)
+
+        except Exception as ex:
+            log("Crypto scan error", chat_id, sym, ex)
+
+    # ---- FOREX ----
+    for sym in cfg["pairs_forex"]:
+        if not cooldown_ok(chat_id, sym, cfg["cooldown_min"]):
+            continue
+
+        pconf = pair_cfg(cfg, sym, "forex")
+        max_spread = float(pconf.get("max_spread_pct", cfg["defaults"]["forex"]["max_spread_pct"]))
+        sp = await twelve_spread_pct(sym)
+        if sp is not None and sp > max_spread:
+            log("Forex spread blocked", sym, sp, ">", max_spread)
+            continue
+
+        try:
+            htf = await fetch_timeseries(sym, "1h", outputsize=250)
+            bias = htf_bias_from_structure(htf)
+            if not bias:
+                continue
+
+            ltf = await fetch_timeseries(sym, "5min", outputsize=250)
+            fvg = scan_fvg(ltf, bias, float(pconf["fvg_min_pct"]), lookback=int(cfg["fvg_lookback"]))
+            if not fvg:
+                continue
+
+            price = float(ltf["close"].iloc[-1])
+            entry = float(fvg["mid"])
+            if not in_price_proximity(price, entry, float(pconf["near_entry_pct"])):
+                continue
+
+            sl = recent_swing_sl(ltf, bias, lookback=14)
+            risk = abs(entry - sl)
+            if risk <= 0:
+                continue
+
+            rr = float(pconf["rr"])
+            tp = entry + risk * rr if bias == "BUY" else entry - risk * rr
+
+            spread_line = f"{sp:.3f}% (max {max_spread}%)" if sp is not None else f"Unavailable (max {max_spread}%)"
+            msg = (
+                f"📌 *SMC + FVG ALERT*\n\n"
+                f"Pair: *{sym}* (Forex)\n"
                 f"Session: *{session_name}*\n"
                 f"Bias: *{bias}*\n"
                 f"FVG gap: *{fvg['gap_pct']:.2f}%*\n"
@@ -755,18 +689,13 @@ async def scan_for_user(app: Application, chat_id: str, cfg: dict):
             )
 
             await app.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=ParseMode.MARKDOWN)
-            mark_cooldown(chat_id, fx)
+            mark_cooldown(chat_id, sym)
             await asyncio.sleep(1)
 
         except Exception as ex:
-            log("Forex scan error", chat_id, fx, ex)
+            log("Forex scan error", chat_id, sym, ex)
 
 async def background_scanner(app: Application):
-    # preload
-    try:
-        await crypto_load_markets()
-    except Exception as ex:
-        log("crypto_load_markets failed", ex)
     await twelve_refresh_markets(force=True)
 
     while True:
