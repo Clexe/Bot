@@ -1,16 +1,12 @@
-# =========================
-# IMPORTS
-# =========================
 import os
 import json
 import asyncio
 import requests
-from datetime import datetime, time, timedelta
-from typing import Dict, Any
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional
 
 import pytz
 import pandas as pd
-import numpy as np
 
 from telegram import (
     Update,
@@ -27,53 +23,55 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
+# =====================
 # ENV
-# =========================
+# =====================
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
 if not BOT_TOKEN or not TWELVE_API_KEY:
-    raise RuntimeError("Missing TELEGRAM_TOKEN or TWELVE_API_KEY")
+    raise RuntimeError("Missing env variables")
 
 UTC = pytz.UTC
 TWELVE_BASE = "https://api.twelvedata.com"
-
-# =========================
-# STORAGE
-# =========================
 DATA_FILE = "users.json"
 
+# =====================
+# DEFAULT USER
+# =====================
 DEFAULT_USER = {
     "enabled": True,
-    "session": "both",
-    "scan_interval_sec": 60,
+    "pairs": [],
+    "scan_interval": 60,
     "cooldown_min": 90,
-    "fvg_lookback": 80,
-
-    "pairs_crypto": ["BTC/USD", "ETH/USD"],
-    "pairs_forex": ["EUR/USD", "XAU/USD", "XAG/USD"],
-
-    "pair_config": {
-        "BTC/USD": {"rr": 2.3, "fvg_min_pct": 0.08, "near_entry_pct": 0.25, "max_spread_pct": 0.30},
-        "ETH/USD": {"rr": 2.1, "fvg_min_pct": 0.10, "near_entry_pct": 0.30, "max_spread_pct": 0.30},
-        "EUR/USD": {"rr": 2.0, "fvg_min_pct": 0.03, "near_entry_pct": 0.20, "max_spread_pct": 0.10},
-        "XAU/USD": {"rr": 1.8, "fvg_min_pct": 0.04, "near_entry_pct": 0.15, "max_spread_pct": 0.25},
-        "XAG/USD": {"rr": 1.6, "fvg_min_pct": 0.05, "near_entry_pct": 0.18, "max_spread_pct": 0.30},
-    }
+    "session": "both",
 }
 
+# =====================
+# RUNTIME STATE
+# =====================
 RUNTIME: Dict[str, Dict[str, Any]] = {}
 
-# =========================
+# =====================
+# MARKET CACHE
+# =====================
+MARKETS = {
+    "forex": set(),
+    "crypto": set(),
+    "commodities": set(),
+    "indices": set(),
+    "last": None
+}
+
+# =====================
 # UTIL
-# =========================
+# =====================
 def log(*a):
     if DEBUG:
         print("[DEBUG]", *a)
 
-def now_utc():
+def now():
     return datetime.now(UTC)
 
 def load_users():
@@ -83,205 +81,231 @@ def load_users():
     except:
         return {}
 
-def save_users(u):
+def save_users(d):
     with open(DATA_FILE, "w") as f:
-        json.dump(u, f, indent=2)
+        json.dump(d, f, indent=2)
 
 def get_user(users, chat_id):
     if chat_id not in users:
-        users[chat_id] = json.loads(json.dumps(DEFAULT_USER))
+        users[chat_id] = DEFAULT_USER.copy()
         save_users(users)
-    RUNTIME.setdefault(chat_id, {"cooldowns": {}})
+    RUNTIME.setdefault(chat_id, {"cooldowns": {}, "awaiting": None})
     return users[chat_id]
 
-# =========================
+# =====================
 # TWELVE DATA
-# =========================
-def twelve_get(path, params):
+# =====================
+def twelve_get(path, params=None):
+    params = params or {}
     params["apikey"] = TWELVE_API_KEY
     r = requests.get(f"{TWELVE_BASE}/{path}", params=params, timeout=10)
     r.raise_for_status()
     return r.json()
 
-async def fetch_df(symbol, tf, limit=250):
+async def refresh_markets():
+    if MARKETS["last"] and (now() - MARKETS["last"]) < timedelta(hours=6):
+        return
+
+    def _fetch():
+        fx = twelve_get("forex_pairs").get("data", [])
+        cr = twelve_get("cryptocurrencies").get("data", [])
+        cm = twelve_get("commodities").get("data", [])
+        ix = twelve_get("indices").get("data", [])
+
+        return (
+            {x["symbol"].upper() for x in fx},
+            {x["symbol"].upper() for x in cr},
+            {x["symbol"].upper() for x in cm},
+            {x["symbol"].upper() for x in ix},
+        )
+
+    fx, cr, cm, ix = await asyncio.to_thread(_fetch)
+    MARKETS["forex"] = fx
+    MARKETS["crypto"] = cr
+    MARKETS["commodities"] = cm
+    MARKETS["indices"] = ix
+    MARKETS["last"] = now()
+
+def normalize(sym):
+    s = sym.replace("_", "/").upper().strip()
+    if "/" in s and len(s.split("/")) == 2:
+        return s
+    return None
+
+def market_type(sym):
+    if sym in MARKETS["crypto"]: return "Crypto"
+    if sym in MARKETS["forex"]: return "Forex"
+    if sym in MARKETS["commodities"]: return "Commodity"
+    if sym in MARKETS["indices"]: return "Index"
+    return None
+
+# =====================
+# STRATEGY
+# =====================
+async def fetch_df(symbol, interval):
     def _f():
         d = twelve_get("time_series", {
             "symbol": symbol,
-            "interval": tf,
-            "outputsize": limit,
+            "interval": interval,
+            "outputsize": 200,
             "timezone": "UTC"
         })
-        rows = [[
-            pd.to_datetime(v["datetime"], utc=True),
-            float(v["open"]), float(v["high"]),
-            float(v["low"]), float(v["close"])
-        ] for v in d["values"]]
+        rows = []
+        for v in d.get("values", []):
+            rows.append([
+                pd.to_datetime(v["datetime"], utc=True),
+                float(v["open"]),
+                float(v["high"]),
+                float(v["low"]),
+                float(v["close"]),
+            ])
         df = pd.DataFrame(rows, columns=["ts","open","high","low","close"])
         return df.sort_values("ts")
+
     return await asyncio.to_thread(_f)
 
-async def spread_pct(symbol):
-    try:
-        q = twelve_get("quote", {"symbol": symbol})
-        bid, ask = float(q["bid"]), float(q["ask"])
-        return (ask - bid) / ((ask + bid) / 2) * 100
-    except:
-        return None
-
-# =========================
-# NEWS FILTER
-# =========================
-def high_impact_news():
-    try:
-        ev = requests.get(
-            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-            timeout=5
-        ).json()
-        now = datetime.utcnow().replace(tzinfo=UTC)
-        for e in ev:
-            if e.get("impact") != "High":
-                continue
-            if not any(x in (e.get("title") or "") for x in ["CPI","FOMC","NFP"]):
-                continue
-            t = datetime.fromisoformat(e["date"].replace("Z","")).replace(tzinfo=UTC)
-            if abs((t-now).total_seconds()) < 3600:
-                return True
-    except:
-        pass
-    return False
-
-# =========================
-# SMC + FVG
-# =========================
-def find_swings(df):
-    sh, sl = [], []
-    for i in range(2, len(df)-2):
-        if df.high.iloc[i] == df.high.iloc[i-2:i+3].max():
-            sh.append(df.high.iloc[i])
-        if df.low.iloc[i] == df.low.iloc[i-2:i+3].min():
-            sl.append(df.low.iloc[i])
-    return sh, sl
-
-def htf_bias(df):
-    sh, sl = find_swings(df)
-    if len(sh)<2 or len(sl)<2: return None
-    if sh[-1]>sh[-2] and sl[-1]>sl[-2]: return "BUY"
-    if sh[-1]<sh[-2] and sl[-1]<sl[-2]: return "SELL"
+def fvg(df, direction):
+    for i in range(2, len(df)):
+        a,b,c = df.iloc[i-2], df.iloc[i-1], df.iloc[i]
+        if direction == "BUY" and a.high < c.low:
+            return (a.high + c.low)/2
+        if direction == "SELL" and a.low > c.high:
+            return (a.low + c.high)/2
     return None
 
-def scan_fvg(df, dir, min_pct, lookback):
-    best=None
-    for i in range(max(2,len(df)-lookback),len(df)):
-        a,b,c=df.iloc[i-2],df.iloc[i-1],df.iloc[i]
-        if dir=="BUY" and a.high<c.low:
-            g=(c.low-a.high)/b.close*100
-            if g>=min_pct: best={"mid":(a.high+c.low)/2,"gap":g}
-        if dir=="SELL" and a.low>c.high:
-            g=(a.low-c.high)/b.close*100
-            if g>=min_pct: best={"mid":(a.low+c.high)/2,"gap":g}
-    return best
-
-def atr(df):
-    tr = pd.concat([
-        df.high-df.low,
-        (df.high-df.close.shift()).abs(),
-        (df.low-df.close.shift()).abs()
-    ],axis=1).max(axis=1)
-    return tr.rolling(14).mean().iloc[-1]
-
-def swing_sl(df, dir):
-    a=atr(df)
-    return df.low.iloc[-14:].min()-a*0.5 if dir=="BUY" else df.high.iloc[-14:].max()+a*0.5
-
-# =========================
+# =====================
 # MENUS
-# =========================
+# =====================
 def kb_main():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Pairs",callback_data="pairs"),
-         InlineKeyboardButton("⚙️ Settings",callback_data="settings")],
-        [InlineKeyboardButton("ℹ️ Help",callback_data="help")]
+        [InlineKeyboardButton("➕ Add Pair", callback_data="add"),
+         InlineKeyboardButton("🗑 Remove Pair", callback_data="remove")],
+        [InlineKeyboardButton("📊 My Pairs", callback_data="pairs"),
+         InlineKeyboardButton("ℹ Help", callback_data="help")]
     ])
 
-# =========================
+# =====================
 # HANDLERS
-# =========================
-async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
-    users=load_users()
-    cfg=get_user(users,str(update.effective_chat.id))
+# =====================
+async def start(update: Update, ctx):
+    users = load_users()
+    chat_id = str(update.effective_chat.id)
+    get_user(users, chat_id)
+    await refresh_markets()
     await update.message.reply_text(
-        "🟢 *SMC Scanner Active*\n\nAlerts only.\nLondon + NY.\n",
+        "🟢 *SMC Scanner Online*\n\nUse menu below.",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb_main()
     )
 
-async def menu(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query
+async def callbacks(update: Update, ctx):
+    q = update.callback_query
     await q.answer()
-    if q.data=="pairs":
-        return await q.edit_message_text("📊 Your markets are active.",reply_markup=kb_main())
-    if q.data=="settings":
-        return await q.edit_message_text("⚙️ Settings are auto-managed.",reply_markup=kb_main())
-    if q.data=="help":
-        return await q.edit_message_text("ℹ️ SMC + FVG scanner.\nAlerts only.",reply_markup=kb_main())
 
-# =========================
-# SCANNER
-# =========================
-async def scan_user(app,chat_id,cfg):
-    if high_impact_news(): return
-    for sym in cfg["pairs_crypto"]+cfg["pairs_forex"]:
-        sp=await spread_pct(sym)
-        if sp and sp>cfg["pair_config"][sym]["max_spread_pct"]:
-            continue
+    users = load_users()
+    chat_id = str(q.message.chat.id)
+    user = get_user(users, chat_id)
 
-        htf=await fetch_df(sym,"1h")
-        bias=htf_bias(htf)
-        if not bias: continue
-
-        ltf=await fetch_df(sym,"5min")
-        fvg=scan_fvg(ltf,bias,cfg["pair_config"][sym]["fvg_min_pct"],cfg["fvg_lookback"])
-        if not fvg: continue
-
-        entry=fvg["mid"]
-        sl=swing_sl(ltf,bias)
-        risk=abs(entry-sl)
-        rr=cfg["pair_config"][sym]["rr"]
-
-        tp1=entry+risk if bias=="BUY" else entry-risk
-        tp2=entry+risk*rr if bias=="BUY" else entry-risk*rr
-
-        msg=(
-            f"📌 *SMC + FVG ALERT*\n\n"
-            f"*{sym}* | {bias}\n\n"
-            f"Entry: `{entry:.5f}`\n"
-            f"SL: `{sl:.5f}`\n"
-            f"TP1: `{tp1:.5f}`\n"
-            f"TP2: `{tp2:.5f}`"
+    if q.data == "add":
+        RUNTIME[chat_id]["awaiting"] = "add"
+        return await q.edit_message_text(
+            "Send symbol (e.g. `XAU/USD`, `BTC/USD`, `EUR/USD`)",
+            parse_mode=ParseMode.MARKDOWN
         )
-        await app.bot.send_message(chat_id=int(chat_id),text=msg,parse_mode=ParseMode.MARKDOWN)
-        await asyncio.sleep(1)
 
+    if q.data == "remove":
+        buttons = [
+            [InlineKeyboardButton(sym, callback_data=f"rm:{sym}")]
+            for sym in user["pairs"]
+        ] or [[InlineKeyboardButton("None", callback_data="noop")]]
+        return await q.edit_message_text("Select pair to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+
+    if q.data.startswith("rm:"):
+        sym = q.data.split("rm:")[1]
+        if sym in user["pairs"]:
+            user["pairs"].remove(sym)
+            save_users(users)
+        return await q.edit_message_text(f"Removed {sym}", reply_markup=kb_main())
+
+    if q.data == "pairs":
+        txt = "\n".join(user["pairs"]) or "No pairs added"
+        return await q.edit_message_text(f"*Your Pairs:*\n{txt}", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_main())
+
+    if q.data == "help":
+        return await q.edit_message_text(
+            "This bot scans all Twelve Data markets using SMC + FVG.\n\nAdd pairs and wait for alerts.",
+            reply_markup=kb_main()
+        )
+
+async def text_handler(update: Update, ctx):
+    users = load_users()
+    chat_id = str(update.effective_chat.id)
+    user = get_user(users, chat_id)
+
+    if RUNTIME[chat_id]["awaiting"] != "add":
+        return
+
+    sym = normalize(update.message.text)
+    if not sym:
+        return await update.message.reply_text("Invalid format. Example: XAU/USD")
+
+    await refresh_markets()
+    if not market_type(sym):
+        return await update.message.reply_text("Pair not supported by Twelve Data.")
+
+    if sym not in user["pairs"]:
+        user["pairs"].append(sym)
+        save_users(users)
+
+    RUNTIME[chat_id]["awaiting"] = None
+    await update.message.reply_text(f"✅ Added {sym}", reply_markup=kb_main())
+
+# =====================
+# SCANNER
+# =====================
 async def scanner(app):
     while True:
-        users=load_users()
-        for cid,cfg in users.items():
-            if cfg.get("enabled"):
-                await scan_user(app,cid,cfg)
+        users = load_users()
+        for chat_id, user in users.items():
+            for sym in user["pairs"]:
+                try:
+                    htf = await fetch_df(sym, "1h")
+                    bias = "BUY" if htf.close.iloc[-1] > htf.close.iloc[-2] else "SELL"
+                    ltf = await fetch_df(sym, "5min")
+                    entry = fvg(ltf, bias)
+                    if not entry:
+                        continue
+
+                    sl = ltf.low.min() if bias=="BUY" else ltf.high.max()
+                    risk = max(abs(entry-sl), abs(ltf.close.iloc[-1]*0.002))
+                    tp = entry + risk*2 if bias=="BUY" else entry - risk*2
+
+                    msg = (
+                        f"📌 *SMC + FVG ALERT*\n\n"
+                        f"Pair: *{sym}*\n"
+                        f"Bias: *{bias}*\n"
+                        f"Entry: `{entry:.4f}`\n"
+                        f"SL: `{sl:.4f}`\n"
+                        f"TP: `{tp:.4f}`"
+                    )
+                    await app.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=ParseMode.MARKDOWN)
+                except Exception as e:
+                    log(e)
         await asyncio.sleep(60)
 
-async def on_startup(app):
+async def startup(app):
     asyncio.create_task(scanner(app))
 
-# =========================
-# APP
-# =========================
-def build():
-    app=Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",cmd_start))
-    app.add_handler(CallbackQueryHandler(menu))
-    app.post_init=on_startup
-    return app
+# =====================
+# RUN
+# =====================
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(callbacks))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.post_init = startup
+    app.run_polling(close_loop=False)
 
-if __name__=="__main__":
-    build().run_polling(close_loop=False)
+if __name__ == "__main__":
+    main()
