@@ -93,15 +93,9 @@ def get_user(users, chat_id):
     return users[chat_id]
 
 async def safe_edit(query, text, markup=None, parse_mode=ParseMode.MARKDOWN):
-    """
-    Prevents Telegram errors like:
-    - Message is not modified
-    - Message to edit not found
-    """
     try:
         await query.edit_message_text(text=text, reply_markup=markup, parse_mode=parse_mode)
     except Exception as e:
-        # fallback to sending a new message instead of dying
         log("safe_edit fallback:", e)
         try:
             await query.message.reply_text(text=text, reply_markup=markup, parse_mode=parse_mode)
