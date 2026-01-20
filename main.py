@@ -28,14 +28,12 @@ from telegram.ext import (
 # ENV
 # =====================
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
-if not BOT_TOKEN or not TWELVE_API_KEY:
+if not BOT_TOKEN:
     raise RuntimeError("Missing env variables")
 
 UTC = pytz.UTC
-TWELVE_BASE = "https://api.twelvedata.com"
 DATA_FILE = "users.json"
 
 # =====================
@@ -111,111 +109,55 @@ async def safe_edit(query, text, markup=None, parse_mode=ParseMode.MARKDOWN):
             log("safe_edit second failure:", e2)
 
 # =====================
-# TWELVE DATA
+# MSNR (Market Structure and Noise Reduction)
+# =====================
+def moving_average(df, period=50):
+    return df['close'].rolling(window=period).mean()
+
+def check_trend(df, period=50):
+    ma = moving_average(df, period)
+    last_close = df['close'].iloc[-1]
+    if last_close > ma.iloc[-1]:
+        return "bullish"
+    elif last_close < ma.iloc[-1]:
+        return "bearish"
+    return "neutral"
+
+def atr(df, period=14):
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+
+    return tr.rolling(period).mean().iloc[-1]
+
+def msnr_filter(df, period=50, atr_threshold=0.0005):
+    trend = check_trend(df, period)
+    current_atr = atr(df)
+
+    if trend == "bullish" and current_atr < atr_threshold:
+        return "buy"
+    elif trend == "bearish" and current_atr < atr_threshold:
+        return "sell"
+    return "no trade"
+
+# =====================
+# TWELVE DATA (OPTIONAL, REMOVE IF USING MT5 AND BYBIT)
 # =====================
 def twelve_get(path, params=None, timeout=25):
-    """
-    Retry + backoff so TwelveData timeouts don't kill the bot.
-    """
     params = params or {}
-    params["apikey"] = TWELVE_API_KEY
-
-    last_err = None
-    for attempt in range(3):
-        try:
-            r = requests.get(f"{TWELVE_BASE}/{path}", params=params, timeout=timeout)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last_err = e
-            pytime.sleep(1.5 * (attempt + 1))
-    raise last_err
-
-async def refresh_markets(force=False):
-    """
-    Cached for 6 hours.
-    Commodities + indices are optional (often slow).
-    NEVER throws — it logs and returns.
-    """
-    if MARKETS["loading"]:
-        return
-    if (not force) and MARKETS["last"] and (now() - MARKETS["last"]) < timedelta(hours=6):
-        return
-
-    MARKETS["loading"] = True
-
-    def _fetch():
-        fx = twelve_get("forex_pairs").get("data", [])
-        cr = twelve_get("cryptocurrencies").get("data", [])
-
-        # optional endpoints
-        try:
-            cm = twelve_get("commodities").get("data", [])
-        except Exception:
-            cm = []
-        try:
-            ix = twelve_get("indices").get("data", [])
-        except Exception:
-            ix = []
-
-        return (
-            {x.get("symbol", "").upper() for x in fx if x.get("symbol")},
-            {x.get("symbol", "").upper() for x in cr if x.get("symbol")},
-            {x.get("symbol", "").upper() for x in cm if x.get("symbol")},
-            {x.get("symbol", "").upper() for x in ix if x.get("symbol")},
-        )
-
-    try:
-        fx, cr, cm, ix = await asyncio.to_thread(_fetch)
-        MARKETS["forex"] = fx
-        MARKETS["crypto"] = cr
-        MARKETS["commodities"] = cm
-        MARKETS["indices"] = ix
-        MARKETS["last"] = now()
-        log("Markets refreshed:", len(fx), len(cr), len(cm), len(ix))
-    except Exception as e:
-        log("refresh_markets failed:", e)
-    finally:
-        MARKETS["loading"] = False
-
-def normalize(sym):
-    s = sym.replace("_", "/").upper().strip()
-    if "/" in s and len(s.split("/")) == 2:
-        return s
-    return None
-
-def market_type(sym):
-    if sym in MARKETS["crypto"]: return "Crypto"
-    if sym in MARKETS["forex"]: return "Forex"
-    if sym in MARKETS["commodities"]: return "Commodity"
-    if sym in MARKETS["indices"]: return "Index"
-    return None
+    r = requests.get(f"https://api.twelvedata.com/{path}", params=params, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
 # =====================
-# STRATEGY
+# STRATEGY (SMC + FVG)
 # =====================
-async def fetch_df(symbol, interval):
-    def _f():
-        d = twelve_get("time_series", {
-            "symbol": symbol,
-            "interval": interval,
-            "outputsize": 200,
-            "timezone": "UTC"
-        })
-        rows = []
-        for v in d.get("values", []):
-            rows.append([
-                pd.to_datetime(v["datetime"], utc=True),
-                float(v["open"]),
-                float(v["high"]),
-                float(v["low"]),
-                float(v["close"]),
-            ])
-        df = pd.DataFrame(rows, columns=["ts","open","high","low","close"])
-        return df.sort_values("ts")
-
-    return await asyncio.to_thread(_f)
-
 def fvg(df, direction):
     for i in range(2, len(df)):
         a, b, c = df.iloc[i-2], df.iloc[i-1], df.iloc[i]
@@ -223,6 +165,17 @@ def fvg(df, direction):
             return (a.high + c.low) / 2
         if direction == "SELL" and a.low > c.high:
             return (a.low + c.high) / 2
+    return None
+
+async def fetch_df(symbol, interval):
+    def _f():
+        # Placeholder for actual MT5 and Bybit fetches (add your logic here)
+        pass
+    return await asyncio.to_thread(_f)
+
+def market_type(sym):
+    if sym in MARKETS["crypto"]: return "Crypto"
+    if sym in MARKETS["forex"]: return "Forex"
     return None
 
 # =====================
@@ -341,26 +294,33 @@ async def scanner(app: Application):
         for chat_id, user in users.items():
             for sym in user["pairs"]:
                 try:
-                    htf = await fetch_df(sym, "1h")
-                    if len(htf) < 3:
+                    # Apply MSNR to check if we should trade
+                    htf_df = await fetch_df(sym, "1h")
+                    msnr_signal = msnr_filter(htf_df, period=50, atr_threshold=0.0005)
+
+                    if msnr_signal == "no trade":
                         continue
 
-                    bias = "BUY" if htf.close.iloc[-1] > htf.close.iloc[-2] else "SELL"
+                    # Check structure and FVG
+                    bias = "BUY" if msnr_signal == "buy" else "SELL"
+                    ltf_df = await fetch_df(sym, "5m")
+                    fvg = scan_fvg(ltf_df, bias, min_gap_pct=0.08, lookback=80)
 
-                    ltf = await fetch_df(sym, "5min")
-                    if len(ltf) < 5:
+                    if not fvg:
                         continue
 
-                    entry = fvg(ltf, bias)
-                    if not entry:
+                    entry = fvg["mid"]
+                    sl = recent_swing_sl(ltf_df, bias)
+                    risk = abs(entry - sl)
+
+                    if risk <= 0:
                         continue
 
-                    sl = ltf.low.min() if bias == "BUY" else ltf.high.max()
-                    risk = max(abs(entry - sl), abs(ltf.close.iloc[-1] * 0.002))
-                    tp = entry + risk * 2 if bias == "BUY" else entry - risk * 2
+                    rr = float(user["pair_config"].get(sym, {}).get("rr", 2.0))
+                    tp = entry + risk * rr if bias == "BUY" else entry - risk * rr
 
                     msg = (
-                        f"📌 *SMC + FVG ALERT*\n\n"
+                        f"📌 *MSNR + SMC + FVG ALERT*\n\n"
                         f"Pair: *{sym}*\n"
                         f"Bias: *{bias}*\n"
                         f"Entry: `{entry:.4f}`\n"
@@ -368,10 +328,8 @@ async def scanner(app: Application):
                         f"TP: `{tp:.4f}`"
                     )
                     await app.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=ParseMode.MARKDOWN)
-                    await asyncio.sleep(0.7)
-
                 except Exception as e:
-                    log("scan error:", sym, e)
+                    log("scan error:", e)
 
         await asyncio.sleep(60)
 
