@@ -366,7 +366,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     # Start the scanner after the bot is initialized
-    asyncio.create_task(scanner(app))
+    asyncio.run(scanner(app))  # Using asyncio.run to start the event loop
 
     app.run_polling(drop_pending_updates=True, close_loop=False)
 
