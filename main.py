@@ -1,3 +1,4 @@
+
 import os
 import json
 import asyncio
@@ -55,7 +56,7 @@ DEFAULT_USER = {
 RUNTIME: Dict[str, Dict[str, Any]] = {}
 
 # =====================
-# MARKET CACHE (ONLY USING TWELVE DATA)
+# MARKET CACHE
 # =====================
 MARKETS = {
     "forex": set(),
@@ -95,9 +96,15 @@ def get_user(users, chat_id):
     return users[chat_id]
 
 async def safe_edit(query, text, markup=None, parse_mode=ParseMode.MARKDOWN):
+    """
+    Prevents Telegram errors like:
+    - Message is not modified
+    - Message to edit not found
+    """
     try:
         await query.edit_message_text(text=text, reply_markup=markup, parse_mode=parse_mode)
     except Exception as e:
+        # fallback to sending a new message instead of dying
         log("safe_edit fallback:", e)
         try:
             await query.message.reply_text(text=text, reply_markup=markup, parse_mode=parse_mode)
@@ -181,20 +188,13 @@ def normalize(sym):
 def market_type(sym):
     if sym in MARKETS["crypto"]: return "Crypto"
     if sym in MARKETS["forex"]: return "Forex"
+    if sym in MARKETS["commodities"]: return "Commodity"
+    if sym in MARKETS["indices"]: return "Index"
     return None
 
 # =====================
-# STRATEGY (SMC + FVG)
+# STRATEGY
 # =====================
-def fvg(df, direction):
-    for i in range(2, len(df)):
-        a, b, c = df.iloc[i-2], df.iloc[i-1], df.iloc[i]
-        if direction == "BUY" and a.high < c.low:
-            return (a.high + c.low) / 2
-        if direction == "SELL" and a.low > c.high:
-            return (a.low + c.high) / 2
-    return None
-
 async def fetch_df(symbol, interval):
     def _f():
         d = twelve_get("time_series", {
@@ -217,6 +217,15 @@ async def fetch_df(symbol, interval):
 
     return await asyncio.to_thread(_f)
 
+def fvg(df, direction):
+    for i in range(2, len(df)):
+        a, b, c = df.iloc[i-2], df.iloc[i-1], df.iloc[i]
+        if direction == "BUY" and a.high < c.low:
+            return (a.high + c.low) / 2
+        if direction == "SELL" and a.low > c.high:
+            return (a.low + c.high) / 2
+    return None
+
 # =====================
 # MENUS
 # =====================
@@ -236,6 +245,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     get_user(users, chat_id)
 
+    # Respond immediately so /start never dies on TwelveData
     await update.message.reply_text(
         "🟢 *SMC Scanner Online*\n\nUse menu below.\n(If markets are still loading, give it ~10s.)",
         parse_mode=ParseMode.MARKDOWN,
@@ -303,6 +313,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not sym:
         return await update.message.reply_text("Invalid format. Example: XAU/USD", reply_markup=kb_main())
 
+    # ensure markets exist; don't block forever
     await refresh_markets(force=False)
 
     if not market_type(sym):
@@ -326,62 +337,47 @@ async def scanner(app: Application):
         users = load_users()
 
         # keep markets warm in background
-        await refresh_markets(force=False)
+        asyncio.create_task(refresh_markets(force=False))
 
         for chat_id, user in users.items():
-            await scan_for_user(app, chat_id, user)
+            for sym in user["pairs"]:
+                try:
+                    htf = await fetch_df(sym, "1h")
+                    if len(htf) < 3:
+                        continue
+
+                    bias = "BUY" if htf.close.iloc[-1] > htf.close.iloc[-2] else "SELL"
+
+                    ltf = await fetch_df(sym, "5min")
+                    if len(ltf) < 5:
+                        continue
+
+                    entry = fvg(ltf, bias)
+                    if not entry:
+                        continue
+
+                    sl = ltf.low.min() if bias == "BUY" else ltf.high.max()
+                    risk = max(abs(entry - sl), abs(ltf.close.iloc[-1] * 0.002))
+                    tp = entry + risk * 2 if bias == "BUY" else entry - risk * 2
+
+                    msg = (
+                        f"📌 *SMC + FVG ALERT*\n\n"
+                        f"Pair: *{sym}*\n"
+                        f"Bias: *{bias}*\n"
+                        f"Entry: `{entry:.4f}`\n"
+                        f"SL: `{sl:.4f}`\n"
+                        f"TP: `{tp:.4f}`"
+                    )
+                    await app.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=ParseMode.MARKDOWN)
+                    await asyncio.sleep(0.7)
+
+                except Exception as e:
+                    log("scan error:", sym, e)
 
         await asyncio.sleep(60)
 
-# =====================
-# SCAN FOR USER FUNCTION (NEW)  
-# =====================
-async def scan_for_user(app, chat_id, cfg):
-    for symbol in cfg["pairs"]:
-        try:
-            # Get 1h timeframe for trend confirmation
-            htf_df = await fetch_df(symbol, "1h")
-            
-            # Apply MSNR to check if we should trade
-            msnr_signal = msnr_filter(htf_df, period=50, atr_threshold=0.0005)
-
-            if msnr_signal == "no trade":
-                continue
-
-            # Check structure and FVG
-            bias = "BUY" if msnr_signal == "buy" else "SELL"
-            ltf_df = await fetch_df(symbol, "5m")
-            fvg = scan_fvg(ltf_df, bias, min_gap_pct=0.08, lookback=80)
-
-            if not fvg:
-                continue
-
-            entry = fvg["mid"]
-            sl = recent_swing_sl(ltf_df, bias)
-            risk = abs(entry - sl)
-
-            if risk <= 0:
-                continue
-
-            rr = float(cfg["pair_config"].get(symbol, {}).get("rr", 2.0))
-            tp = entry + risk * rr if bias == "BUY" else entry - risk * rr
-
-            msg = (
-                f"📌 *MSNR + SMC + FVG ALERT*\n\n"
-                f"Pair: {symbol}\n"
-                f"Session: {killzone_name()}\n"
-                f"Bias: {bias}\n"
-                f"FVG gap: {fvg['gap_pct']:.2f}%\n"
-                f"Entry: {entry:.4f}\n"
-                f"SL: {sl:.4f}\n"
-                f"TP: {tp:.4f}\n"
-            )
-
-            await app.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode=ParseMode.MARKDOWN)
-        except Exception as e:
-            log("Scan error:", e)
-
-    await asyncio.sleep(cfg["scan_interval_sec"])
+async def startup(app: Application):
+    asyncio.create_task(scanner(app))
 
 # =====================
 # RUN
@@ -391,11 +387,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.post_init = startup
 
-    # Run the scanner loop after initializing the bot
-    asyncio.run(scanner(app))  # This will properly start the loop for background scanning
-
-    # Start the bot
+    # IMPORTANT: helps on redeploys/restarts
     app.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
