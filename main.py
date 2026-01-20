@@ -55,7 +55,7 @@ DEFAULT_USER = {
 RUNTIME: Dict[str, Dict[str, Any]] = {}
 
 # =====================
-# MARKET CACHE
+# MARKET CACHE (ONLY USING TWELVE DATA)
 # =====================
 MARKETS = {
     "forex": set(),
@@ -105,51 +105,83 @@ async def safe_edit(query, text, markup=None, parse_mode=ParseMode.MARKDOWN):
             log("safe_edit second failure:", e2)
 
 # =====================
-# MSNR (Market Structure and Noise Reduction)
-# =====================
-def moving_average(df, period=50):
-    return df['close'].rolling(window=period).mean()
-
-def check_trend(df, period=50):
-    ma = moving_average(df, period)
-    last_close = df['close'].iloc[-1]
-    if last_close > ma.iloc[-1]:
-        return "bullish"
-    elif last_close < ma.iloc[-1]:
-        return "bearish"
-    return "neutral"
-
-def atr(df, period=14):
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low - close.shift()).abs()
-    ], axis=1).max(axis=1)
-
-    return tr.rolling(period).mean().iloc[-1]
-
-def msnr_filter(df, period=50, atr_threshold=0.0005):
-    trend = check_trend(df, period)
-    current_atr = atr(df)
-
-    if trend == "bullish" and current_atr < atr_threshold:
-        return "buy"
-    elif trend == "bearish" and current_atr < atr_threshold:
-        return "sell"
-    return "no trade"
-
-# =====================
-# TWELVE DATA (OPTIONAL, REMOVE IF USING MT5 AND BYBIT)
+# TWELVE DATA
 # =====================
 def twelve_get(path, params=None, timeout=25):
+    """
+    Retry + backoff so TwelveData timeouts don't kill the bot.
+    """
     params = params or {}
-    r = requests.get(f"https://api.twelvedata.com/{path}", params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+    params["apikey"] = TWELVE_API_KEY
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.get(f"{TWELVE_BASE}/{path}", params=params, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            pytime.sleep(1.5 * (attempt + 1))
+    raise last_err
+
+async def refresh_markets(force=False):
+    """
+    Cached for 6 hours.
+    Commodities + indices are optional (often slow).
+    NEVER throws — it logs and returns.
+    """
+    if MARKETS["loading"]:
+        return
+    if (not force) and MARKETS["last"] and (now() - MARKETS["last"]) < timedelta(hours=6):
+        return
+
+    MARKETS["loading"] = True
+
+    def _fetch():
+        fx = twelve_get("forex_pairs").get("data", [])
+        cr = twelve_get("cryptocurrencies").get("data", [])
+
+        # optional endpoints
+        try:
+            cm = twelve_get("commodities").get("data", [])
+        except Exception:
+            cm = []
+        try:
+            ix = twelve_get("indices").get("data", [])
+        except Exception:
+            ix = []
+
+        return (
+            {x.get("symbol", "").upper() for x in fx if x.get("symbol")},
+            {x.get("symbol", "").upper() for x in cr if x.get("symbol")},
+            {x.get("symbol", "").upper() for x in cm if x.get("symbol")},
+            {x.get("symbol", "").upper() for x in ix if x.get("symbol")},
+        )
+
+    try:
+        fx, cr, cm, ix = await asyncio.to_thread(_fetch)
+        MARKETS["forex"] = fx
+        MARKETS["crypto"] = cr
+        MARKETS["commodities"] = cm
+        MARKETS["indices"] = ix
+        MARKETS["last"] = now()
+        log("Markets refreshed:", len(fx), len(cr), len(cm), len(ix))
+    except Exception as e:
+        log("refresh_markets failed:", e)
+    finally:
+        MARKETS["loading"] = False
+
+def normalize(sym):
+    s = sym.replace("_", "/").upper().strip()
+    if "/" in s and len(s.split("/")) == 2:
+        return s
+    return None
+
+def market_type(sym):
+    if sym in MARKETS["crypto"]: return "Crypto"
+    if sym in MARKETS["forex"]: return "Forex"
+    return None
 
 # =====================
 # STRATEGY (SMC + FVG)
@@ -184,11 +216,6 @@ async def fetch_df(symbol, interval):
         return df.sort_values("ts")
 
     return await asyncio.to_thread(_f)
-
-def market_type(sym):
-    if sym in MARKETS["crypto"]: return "Crypto"
-    if sym in MARKETS["forex"]: return "Forex"
-    return None
 
 # =====================
 # MENUS
@@ -299,7 +326,7 @@ async def scanner(app: Application):
         users = load_users()
 
         # keep markets warm in background
-        asyncio.create_task(refresh_markets(force=False))
+        await refresh_markets(force=False)
 
         for chat_id, user in users.items():
             await scan_for_user(app, chat_id, user)
@@ -365,9 +392,10 @@ def main():
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # Start the scanner after the bot is initialized
-    asyncio.run(scanner(app))  # Using asyncio.run to start the event loop
+    # Run the scanner loop after initializing the bot
+    asyncio.run(scanner(app))  # This will properly start the loop for background scanning
 
+    # Start the bot
     app.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
