@@ -21,7 +21,9 @@ RUNTIME_STATE = {}
 # =====================
 def load_users():
     if not os.path.exists(DATA_FILE): return {}
-    with open(DATA_FILE, 'r') as f: return json.load(f)
+    try:
+        with open(DATA_FILE, 'r') as f: return json.load(f)
+    except: return {}
 
 def save_users(data):
     with open(DATA_FILE, 'w') as f: json.dump(data, f, indent=4)
@@ -38,20 +40,16 @@ def get_user(users, chat_id):
 # =====================
 # STRATEGIES
 # =====================
-
 def get_extreme_signal(df_lt, df_ht, symbol):
     if df_lt.empty or df_ht.empty: return None
     last_ts = str(df_lt['ts'].iloc[-1])
     is_vol = any(x in symbol for x in ["BTC", "XAU", "XAUT"])
     pip_val = 100 if "JPY" in symbol else 10000
-    
     ht_trend = "BULL" if df_ht['close'].iloc[-1] > df_ht['close'].iloc[-20] else "BEAR"
     tp_buy, tp_sell = df_ht['high'].iloc[-250:].max(), df_ht['low'].iloc[-250:].min()
-    
     c1, c3 = df_lt.iloc[-3], df_lt.iloc[-1]
     curr = c3.close
     sl_gap = 15/pip_val if is_vol else 5/pip_val
-
     if ht_trend == "BULL" and c3.low > c1.high and tp_buy > curr:
         return {"action": "BUY", "entry": curr, "tp": tp_buy, "sl": c1.high - sl_gap, "be": curr + (30/pip_val), "mode": "Normal", "ts": last_ts}
     if ht_trend == "BEAR" and c3.high < c1.low and tp_sell < curr:
@@ -67,7 +65,6 @@ def get_scalping_signal(df, symbol):
     curr, prev = df.iloc[-1], df.iloc[-2]
     pip_val = 100 if "JPY" in symbol else 10000
     mid = (curr.ema10 + curr.ema21) / 2
-
     if curr.ema50 > prev.ema50 and curr.low <= mid <= curr.high:
         return {"action": "BUY", "entry": curr.close, "tp": curr.close + (15/pip_val), "sl": curr.close - (5/pip_val), "mode": "Scalp", "ts": last_ts}
     if curr.ema50 < prev.ema50 and curr.low <= mid <= curr.high:
@@ -75,9 +72,8 @@ def get_scalping_signal(df, symbol):
     return None
 
 # =====================
-# UI & COMMANDS
+# UI & CALLBACKS
 # =====================
-
 def main_menu_kb(user_mode):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🔄 Mode: {user_mode}", callback_data="toggle_mode")],
@@ -87,49 +83,35 @@ def main_menu_kb(user_mode):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(load_users(), str(update.effective_chat.id))
-    await update.message.reply_text(
-        "💹 *Trading Bot Active*\nToggle between strategies or manage your pairs below.",
-        reply_markup=main_menu_kb(user['mode']),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def cmd_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cmd = update.message.text.split('@')[0][1:]
-    uid = str(update.effective_chat.id)
-    users = load_users()
-    user = get_user(users, uid)
-
-    if cmd == "add":
-        RUNTIME_STATE[uid] = "add"
-        await update.message.reply_text("➕ Send symbol (e.g. BTC/USD):")
-    elif cmd == "pairs":
-        txt = "\n".join(user["pairs"]) or "None"
-        await update.message.reply_text(f"📊 *Watchlist:*\n{txt}", parse_mode=ParseMode.MARKDOWN)
-    elif cmd == "setsession":
-        kb = [[InlineKeyboardButton("London", callback_data="ses:london"), InlineKeyboardButton("NY", callback_data="ses:newyork"), InlineKeyboardButton("Both", callback_data="ses:both")]]
-        await update.message.reply_text("⏰ Select Trading Session:", reply_markup=InlineKeyboardMarkup(kb))
-    # ... Other simple commands follow same pattern ...
+    await update.message.reply_text("💹 *Trading System Online*", reply_markup=main_menu_kb(user['mode']), parse_mode=ParseMode.MARKDOWN)
 
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     uid = str(q.message.chat_id); users = load_users(); user = get_user(users, uid)
-
     if q.data == "toggle_mode":
-        current_mode = user.get("mode", "BOTH")
-        new_mode = {"BOTH": "NORMAL", "NORMAL": "SCALP", "SCALP": "BOTH"}[current_mode]
-        user["mode"] = new_mode
+        user["mode"] = {"BOTH": "NORMAL", "NORMAL": "SCALP", "SCALP": "BOTH"}[user.get("mode", "BOTH")]
         save_users(users)
-        await q.edit_message_text(f"✅ Mode switched to: *{new_mode}*", reply_markup=main_menu_kb(new_mode), parse_mode=ParseMode.MARKDOWN)
-    
+        await q.edit_message_text(f"✅ Mode: {user['mode']}", reply_markup=main_menu_kb(user['mode']))
     elif q.data.startswith("ses:"):
         user["session"] = q.data.split(":")[1]
         save_users(users)
         await q.edit_message_text(f"✅ Session: {user['session'].upper()}")
+    elif q.data.startswith("del:"):
+        p = q.data.split(":")[1]
+        if p in user["pairs"]: user["pairs"].remove(p)
+        save_users(users)
+        await q.edit_message_text(f"🗑 Removed {p}")
+
+async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_chat.id); users = load_users(); user = get_user(users, uid)
+    pair = update.message.text.upper().strip()
+    if pair not in user["pairs"]: user["pairs"].append(pair)
+    save_users(users)
+    await update.message.reply_text(f"✅ Monitoring {pair}")
 
 # =====================
-# ENGINE & SCANNER
+# ENGINE & STARTUP
 # =====================
-
 async def fetch_data(symbol, interval):
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=250&apikey={TWELVE_API_KEY}"
     try:
@@ -137,7 +119,6 @@ async def fetch_data(symbol, interval):
         d = r.json()
         if "values" not in d: return pd.DataFrame()
         df = pd.DataFrame(d["values"])
-        # Fix for FutureWarning: convert columns manually
         for col in ['open', 'high', 'low', 'close']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df['ts'] = pd.to_datetime(df['datetime'])
@@ -145,46 +126,41 @@ async def fetch_data(symbol, interval):
     except: return pd.DataFrame()
 
 async def scanner_loop(app: Application):
-    print("🚀 Scanner background task started.")
+    print("🚀 Scanner Task Started")
     while True:
         users = load_users()
         for uid, settings in users.items():
-            user_mode = settings.get("mode", "BOTH")
+            mode = settings.get("mode", "BOTH")
             for pair in settings["pairs"]:
                 key = f"{uid}_{pair}"
                 await asyncio.sleep(API_DELAY)
-                
-                # Fetch only necessary data
                 df_l = await fetch_data(pair, "5min")
-                df_h = await fetch_data(pair, "1day") if user_mode in ["NORMAL", "BOTH"] else pd.DataFrame()
-                
-                # Normal Mode (SMC/100RR)
-                if user_mode in ["NORMAL", "BOTH"]:
-                    sig_n = get_extreme_signal(df_l, df_h, pair)
-                    if sig_n and SENT_SIGNALS.get(f"{key}_n") != sig_n['ts']:
-                        await send_alert(app, uid, pair, sig_n)
-                        SENT_SIGNALS[f"{key}_n"] = sig_n['ts']
-                
-                # Scalp Mode (5m EMA)
-                if user_mode in ["SCALP", "BOTH"]:
-                    sig_s = get_scalping_signal(df_l, pair)
-                    if sig_s and SENT_SIGNALS.get(f"{key}_s") != sig_s['ts']:
-                        await send_alert(app, uid, pair, sig_s)
-                        SENT_SIGNALS[f"{key}_s"] = sig_s['ts']
-                        
+                if mode in ["NORMAL", "BOTH"]:
+                    df_h = await fetch_data(pair, "1day")
+                    sig = get_extreme_signal(df_l, df_h, pair)
+                    if sig and SENT_SIGNALS.get(f"{key}_n") != sig['ts']:
+                        await app.bot.send_message(uid, f"🚨 *NORMAL*\n{pair}: {sig['action']}\nTP: {sig['tp']}", parse_mode=ParseMode.MARKDOWN)
+                        SENT_SIGNALS[f"{key}_n"] = sig['ts']
+                if mode in ["SCALP", "BOTH"]:
+                    sig = get_scalping_signal(df_l, pair)
+                    if sig and SENT_SIGNALS.get(f"{key}_s") != sig['ts']:
+                        await app.bot.send_message(uid, f"🚨 *SCALP*\n{pair}: {sig['action']}\nTP: {sig['tp']}", parse_mode=ParseMode.MARKDOWN)
+                        SENT_SIGNALS[f"{key}_s"] = sig['ts']
         await asyncio.sleep(60)
 
-async def send_alert(app, chat_id, pair, sig):
-    txt = f"🚨 *{sig['mode']} ALERT*\n*{pair}*: {sig['action']}\n\nE: `{sig['entry']:.5f}`\nTP: `{sig['tp']:.5f}`\nSL: `{sig['sl']:.5f}`"
-    await app.bot.send_message(chat_id=chat_id, text=txt, parse_mode=ParseMode.MARKDOWN)
+async def post_init(app: Application):
+    """FIX: Starts the scanner correctly within the active loop"""
+    asyncio.create_task(scanner_loop(app))
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("toggle", handle_callbacks)) # Simple router
     app.add_handler(CallbackQueryHandler(handle_callbacks))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_router))
-    app.post_init = lambda a: asyncio.create_task(scanner_loop(a))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
+    
+    app.post_init = post_init # Fixed Async Hook
+    
+    print("📡 Polling...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__": main()
