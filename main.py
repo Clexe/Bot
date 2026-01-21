@@ -35,7 +35,7 @@ def get_user(users, chat_id):
     return users[chat_id]
 
 # =====================
-# STRATEGIES
+# STRATEGIES (SMC + EMA)
 # =====================
 def get_extreme_signal(df_lt, df_ht, symbol):
     if df_lt.empty or df_ht.empty: return None
@@ -46,7 +46,7 @@ def get_extreme_signal(df_lt, df_ht, symbol):
     curr = c3.close
     sl_gap = 15/pip_val if any(x in symbol for x in ["BTC", "XAU"]) else 5/pip_val
 
-    # Sanity Checks & Signal Logic
+    # TP Sanity Check: Ensure target is in front of entry
     if ht_trend == "BULL" and c3.low > c1.high and tp_buy > curr:
         return {"action": "BUY", "entry": curr, "tp": tp_buy, "sl": c1.high - sl_gap, "be": curr + (30/pip_val), "mode": "Normal", "ts": str(df_lt['ts'].iloc[-1])}
     if ht_trend == "BEAR" and c3.high < c1.low and tp_sell < curr:
@@ -55,13 +55,31 @@ def get_extreme_signal(df_lt, df_ht, symbol):
 
 def get_scalping_signal(df, symbol):
     if len(df) < 60: return None
-    df['ema10'] = df['close'].ewm(span=10).mean(); df['ema21'] = df['close'].ewm(span=21).mean(); df['ema50'] = df['close'].ewm(span=50).mean()
-    curr, prev = df.iloc[-1], df.iloc[-2]; pip_val = 100 if "JPY" in symbol else 10000; mid = (curr.ema10 + curr.ema21) / 2
+    df['ema10'] = df['close'].ewm(span=10).mean()
+    df['ema21'] = df['close'].ewm(span=21).mean()
+    df['ema50'] = df['close'].ewm(span=50).mean()
+    curr, prev = df.iloc[-1], df.iloc[-2]
+    pip_val = 100 if "JPY" in symbol else 10000
+    mid = (curr.ema10 + curr.ema21) / 2
     if curr.ema50 > prev.ema50 and curr.low <= mid <= curr.high:
         return {"action": "BUY", "entry": curr.close, "tp": curr.close + (15/pip_val), "sl": curr.close - (5/pip_val), "mode": "Scalp", "ts": str(df['ts'].iloc[-1])}
     if curr.ema50 < prev.ema50 and curr.low <= mid <= curr.high:
         return {"action": "SELL", "entry": curr.close, "tp": curr.close - (15/pip_val), "sl": curr.close + (5/pip_val), "mode": "Scalp", "ts": str(df['ts'].iloc[-1])}
     return None
+
+# =====================
+# UI HANDLERS
+# =====================
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_user(load_users(), str(update.effective_chat.id))
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"🔄 Mode: {user['mode']}", callback_data="toggle")], [InlineKeyboardButton("📊 Watchlist", callback_data="list")]])
+    await update.message.reply_text("💹 *Trading Control Panel*", reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_chat.id); users = load_users(); user = get_user(users, uid)
+    pair = update.message.text.upper().strip()
+    if pair not in user["pairs"]: user["pairs"].append(pair); save_users(users)
+    await update.message.reply_text(f"✅ Monitoring {pair}")
 
 # =====================
 # ENGINE
@@ -79,7 +97,7 @@ async def fetch_data(symbol, interval):
     except: return pd.DataFrame()
 
 async def scanner_loop(app: Application):
-    print("🚀 Scanner Task ACTIVE."); await asyncio.sleep(5)
+    print("🚀 Scanner started."); await asyncio.sleep(5)
     while True:
         try:
             users = load_users()
@@ -109,7 +127,8 @@ async def post_init(app: Application):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_handler)) # Define handlers as needed
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.post_init = post_init
     app.run_polling(drop_pending_updates=True)
 
