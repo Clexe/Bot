@@ -35,7 +35,7 @@ def get_user(users, chat_id):
     return users[chat_id]
 
 # =====================
-# STRATEGIES (SMC + EMA)
+# STRATEGIES
 # =====================
 def get_extreme_signal(df_lt, df_ht, symbol):
     if df_lt.empty or df_ht.empty: return None
@@ -46,7 +46,7 @@ def get_extreme_signal(df_lt, df_ht, symbol):
     curr = c3.close
     sl_gap = 15/pip_val if any(x in symbol for x in ["BTC", "XAU"]) else 5/pip_val
 
-    # Sanity Checks: Ensure TP is actually in front of price
+    # Sanity Checks & Signal Logic
     if ht_trend == "BULL" and c3.low > c1.high and tp_buy > curr:
         return {"action": "BUY", "entry": curr, "tp": tp_buy, "sl": c1.high - sl_gap, "be": curr + (30/pip_val), "mode": "Normal", "ts": str(df_lt['ts'].iloc[-1])}
     if ht_trend == "BEAR" and c3.high < c1.low and tp_sell < curr:
@@ -55,12 +55,8 @@ def get_extreme_signal(df_lt, df_ht, symbol):
 
 def get_scalping_signal(df, symbol):
     if len(df) < 60: return None
-    df['ema10'] = df['close'].ewm(span=10).mean()
-    df['ema21'] = df['close'].ewm(span=21).mean()
-    df['ema50'] = df['close'].ewm(span=50).mean()
-    curr, prev = df.iloc[-1], df.iloc[-2]
-    pip_val = 100 if "JPY" in symbol else 10000
-    mid = (curr.ema10 + curr.ema21) / 2
+    df['ema10'] = df['close'].ewm(span=10).mean(); df['ema21'] = df['close'].ewm(span=21).mean(); df['ema50'] = df['close'].ewm(span=50).mean()
+    curr, prev = df.iloc[-1], df.iloc[-2]; pip_val = 100 if "JPY" in symbol else 10000; mid = (curr.ema10 + curr.ema21) / 2
     if curr.ema50 > prev.ema50 and curr.low <= mid <= curr.high:
         return {"action": "BUY", "entry": curr.close, "tp": curr.close + (15/pip_val), "sl": curr.close - (5/pip_val), "mode": "Scalp", "ts": str(df['ts'].iloc[-1])}
     if curr.ema50 < prev.ema50 and curr.low <= mid <= curr.high:
@@ -82,8 +78,8 @@ async def fetch_data(symbol, interval):
         df['ts'] = pd.to_datetime(df['datetime']); return df.iloc[::-1].dropna()
     except: return pd.DataFrame()
 
-async def scanner_loop(app):
-    print("🚀 Scanner started."); await asyncio.sleep(5)
+async def scanner_loop(app: Application):
+    print("🚀 Scanner Task ACTIVE."); await asyncio.sleep(5)
     while True:
         try:
             users = load_users()
@@ -92,39 +88,29 @@ async def scanner_loop(app):
                     await asyncio.sleep(API_DELAY); df_l = await fetch_data(pair, "5min")
                     if df_l.empty: continue
                     
-                    # NORMAL MODE ALERT
                     if settings["mode"] in ["NORMAL", "BOTH"]:
                         await asyncio.sleep(API_DELAY); df_h = await fetch_data(pair, "1day")
                         sig = get_extreme_signal(df_l, df_h, pair)
                         if sig and SENT_SIGNALS.get(f"{uid}_{pair}_n") != sig['ts']:
-                            msg = (f"🚨 *{sig['mode']} ALERT*\n"
-                                   f"*{pair}*: {sig['action']}\n\n"
-                                   f"E: `{sig['entry']:.5f}`\n"
-                                   f"TP: `{sig['tp']:.5f}`\n"
-                                   f"SL: `{sig['sl']:.5f}`\n"
-                                   f"🛡 *BE:* `{sig['be']:.5f}`")
-                            await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN)
-                            SENT_SIGNALS[f"{uid}_{pair}_n"] = sig['ts']
+                            msg = f"🚨 *{sig['mode']}*\n*{pair}*: {sig['action']}\n\nE: `{sig['entry']:.5f}`\nTP: `{sig['tp']:.5f}`\nSL: `{sig['sl']:.5f}`\n🛡 *BE:* `{sig['be']:.5f}`"
+                            await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN); SENT_SIGNALS[f"{uid}_{pair}_n"] = sig['ts']
                     
-                    # SCALP MODE ALERT
                     if settings["mode"] in ["SCALP", "BOTH"]:
                         sig = get_scalping_signal(df_l, pair)
                         if sig and SENT_SIGNALS.get(f"{uid}_{pair}_s") != sig['ts']:
-                            msg = (f"🚨 *{sig['mode']} ALERT*\n"
-                                   f"*{pair}*: {sig['action']}\n\n"
-                                   f"E: `{sig['entry']:.5f}`\n"
-                                   f"TP: `{sig['tp']:.5f}`\n"
-                                   f"SL: `{sig['sl']:.5f}`")
-                            await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN)
-                            SENT_SIGNALS[f"{uid}_{pair}_s"] = sig['ts']
+                            msg = f"🚨 *{sig['mode']}*\n*{pair}*: {sig['action']}\n\nE: `{sig['entry']:.5f}`\nTP: `{sig['tp']:.5f}`\nSL: `{sig['sl']:.5f}`"
+                            await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN); SENT_SIGNALS[f"{uid}_{pair}_s"] = sig['ts']
             await asyncio.sleep(60)
         except Exception as e: print(f"🚨 Loop Error: {e}"); await asyncio.sleep(10)
 
+async def post_init(app: Application):
+    """FIX: Proper async hook to start background task"""
+    asyncio.create_task(scanner_loop(app))
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: start(u, c))) # Minimal handlers for brevity
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: handle_text(u, c)))
-    app.post_init = lambda a: asyncio.create_task(scanner_loop(a))
+    app.add_handler(CommandHandler("start", start_handler)) # Define handlers as needed
+    app.post_init = post_init
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__": main()
