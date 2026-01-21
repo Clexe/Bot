@@ -11,7 +11,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
 DATA_FILE = "users.json"
-API_DELAY = 8.5  # Prevents 429 Rate Limit errors
+API_DELAY = 8.5  
 
 SENT_SIGNALS = {}
 RUNTIME_STATE = {}
@@ -40,7 +40,6 @@ def get_user(users, chat_id):
 # =====================
 
 def get_extreme_signal(df_lt, df_ht, symbol):
-    """SMC Sniper (100RR): M5 Entry -> Daily Targets"""
     if df_lt.empty or df_ht.empty: return None
     last_ts = str(df_lt['ts'].iloc[-1])
     is_vol = any(x in symbol for x in ["BTC", "XAU", "XAUT"])
@@ -60,7 +59,6 @@ def get_extreme_signal(df_lt, df_ht, symbol):
     return None
 
 def get_scalping_signal(df, symbol):
-    """5m EMA Strategy: 10, 21, 50 EMAs"""
     if len(df) < 60: return None
     last_ts = str(df['ts'].iloc[-1])
     df['ema10'] = df['close'].ewm(span=10).mean()
@@ -77,22 +75,22 @@ def get_scalping_signal(df, symbol):
     return None
 
 # =====================
-# COMMAND ROUTER (ALL REQUESTS)
+# COMMAND ROUTER
 # =====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_user(load_users(), str(update.effective_chat.id))
-    await update.message.reply_text("💹 *Trading System Online.*\nManage settings via keyboard or /help.")
+    await update.message.reply_text("💹 *Trading System Online.*\nUse /add to begin.")
 
 async def cmd_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cmd = update.message.text.split('@')[0][1:] # Remove / and handle bot name
+    cmd = update.message.text.split('@')[0][1:]
     uid = str(update.effective_chat.id)
     users = load_users()
     user = get_user(users, uid)
 
     if cmd == "add":
         RUNTIME_STATE[uid] = "add"
-        await update.message.reply_text("➕ Symbol to add:")
+        await update.message.reply_text("➕ Symbol to add (e.g. BTC/USD):")
     elif cmd == "remove":
         if not user["pairs"]: return await update.message.reply_text("Watchlist empty.")
         kb = [[InlineKeyboardButton(p, callback_data=f"del:{p}")] for p in user["pairs"]]
@@ -112,8 +110,6 @@ async def cmd_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "setspread":
         RUNTIME_STATE[uid] = "spread"
         await update.message.reply_text("📏 Max spread (e.g. 0.0005):")
-    elif cmd == "help":
-        await update.message.reply_text("SMC/EMA Bot. Use /add to begin.")
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_chat.id)
@@ -121,14 +117,16 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     users = load_users(); user = get_user(users, uid)
 
-    if state == "add":
-        if text.upper() not in user["pairs"]: user["pairs"].append(text.upper())
-    elif state == "scan": user["scan_interval"] = int(text)
-    elif state == "cool": user["cooldown"] = int(text)
-    elif state == "spread": user["max_spread"] = float(text)
-    
-    save_users(users); RUNTIME_STATE[uid] = None
-    await update.message.reply_text(f"✅ Updated.")
+    try:
+        if state == "add":
+            if text.upper() not in user["pairs"]: user["pairs"].append(text.upper())
+        elif state == "scan": user["scan_interval"] = int(text)
+        elif state == "cool": user["cooldown"] = int(text)
+        elif state == "spread": user["max_spread"] = float(text)
+        save_users(users); RUNTIME_STATE[uid] = None
+        await update.message.reply_text(f"✅ Updated.")
+    except:
+        await update.message.reply_text("❌ Invalid input.")
 
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -158,17 +156,27 @@ async def fetch_data(symbol, interval):
     except: return pd.DataFrame()
 
 async def scanner_loop(app: Application):
+    print("🚀 Scanner background task started.")
     while True:
         users = load_users()
         for uid, settings in users.items():
             for pair in settings["pairs"]:
                 key = f"{uid}_{pair}"
-                # Interval logic
                 await asyncio.sleep(API_DELAY)
                 df_h, df_l = await fetch_data(pair, "1day"), await fetch_data(pair, "5min")
-                sig = get_extreme_signal(df_l, df_h, pair)
-                if sig and SENT_SIGNALS.get(f"{key}_n") != sig['ts']:
-                    await send_alert(app, uid, pair, sig); SENT_SIGNALS[f"{key}_n"] = sig['ts']
+                
+                # Normal Mode Logic
+                sig_n = get_extreme_signal(df_l, df_h, pair)
+                if sig_n and SENT_SIGNALS.get(f"{key}_n") != sig_n['ts']:
+                    await send_alert(app, uid, pair, sig_n)
+                    SENT_SIGNALS[f"{key}_n"] = sig_n['ts']
+                
+                # Scalp Mode Logic
+                sig_s = get_scalping_signal(df_l, pair)
+                if sig_s and SENT_SIGNALS.get(f"{key}_s") != sig_s['ts']:
+                    await send_alert(app, uid, pair, sig_s)
+                    SENT_SIGNALS[f"{key}_s"] = sig_s['ts']
+                    
         await asyncio.sleep(60)
 
 async def send_alert(app, chat_id, pair, sig):
@@ -176,14 +184,25 @@ async def send_alert(app, chat_id, pair, sig):
     txt = f"🚨 *{sig['mode']}*\n*{pair}*: {sig['action']}\n\nE: `{sig['entry']:.5f}`\nTP: `{sig['tp']:.5f}`\nSL: `{sig['sl']:.5f}`" + be
     await app.bot.send_message(chat_id=chat_id, text=txt, parse_mode=ParseMode.MARKDOWN)
 
+async def post_init(app: Application):
+    """FIX: Uses the proper loop to start background task"""
+    asyncio.create_task(scanner_loop(app))
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    # Dynamic command mapping
-    for c in ["start","add","remove","pairs","setsession","setscan","setcooldown","setspread","help"]:
+    
+    # Handlers
+    for c in ["start","add","remove","pairs","setsession","setscan","setcooldown","setspread"]:
         app.add_handler(CommandHandler(c, cmd_router if c != "start" else start))
+    
     app.add_handler(CallbackQueryHandler(handle_callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
-    app.post_init = lambda a: asyncio.create_task(scanner_loop(a))
+    
+    # Correct Async Hook
+    app.post_init = post_init
+    
+    print("📡 Bot is starting...")
     app.run_polling(drop_pending_updates=True)
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
