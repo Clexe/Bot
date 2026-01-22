@@ -53,13 +53,21 @@ def is_in_session(session_type):
 # UPDATED SMART ROUTER
 # =====================
 async def fetch_data(pair, interval):
-    clean_pair = pair.replace("/", "").upper().strip()
-    # Identification logic for Deriv assets
-    is_deriv = any(x in clean_pair for x in ["XAU", "EUR", "GBP", "JPY", "R_", "V75", "1S"])
+    # 1. First, Keep Case Sensitivity for the Prefix Check
+    raw_pair = pair.replace("/", "").strip()
+    clean_pair = raw_pair.upper() 
+    
+    # 2. Expanded Keyword List (Added "FRX", "US30", "NAS", "GER")
+    deriv_keywords = ["XAU", "EUR", "GBP", "JPY", "R_", "V75", "1S", "FRX", "US30", "NAS", "GER"]
+    is_deriv = any(x in clean_pair for x in deriv_keywords)
     
     if is_deriv:
-        # Standardize prefix for Forex/Metals
-        if any(x in clean_pair for x in ["XAU", "EUR", "GBP", "JPY"]) and not clean_pair.startswith("frx"):
+        # 3. Smart Prefix Logic (Fixes the Double-Prefix Bug)
+        if clean_pair.startswith("FRX"):
+            # If user entered "frxXAUUSD", it became "FRXXAUUSD". Fix it to "frxXAUUSD"
+            clean_pair = "frx" + clean_pair[3:]
+        elif any(x in clean_pair for x in ["XAU", "EUR", "GBP", "JPY", "US30", "NAS", "GER"]):
+            # If user entered "XAUUSD" (no prefix), add it.
             clean_pair = "frx" + clean_pair
             
         uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
@@ -67,14 +75,11 @@ async def fetch_data(pair, interval):
         
         try:
             async with websockets.connect(uri) as ws:
-                # 1. Authorization Loop (Wait for confirmation)
                 await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
                 while True:
                     auth_res = json.loads(await ws.recv())
-                    if "authorize" in auth_res:
-                        break 
+                    if "authorize" in auth_res: break 
                 
-                # 2. Request Data
                 await ws.send(json.dumps({
                     "ticks_history": clean_pair, 
                     "count": 100, 
@@ -86,26 +91,22 @@ async def fetch_data(pair, interval):
                 candles = res.get("candles", [])
                 
                 if not candles:
-                    print(f"⚠️ Deriv: No data returned for {clean_pair}")
+                    print(f"⚠️ Deriv: No data for {clean_pair}")
                     return pd.DataFrame()
                 
-                # 3. Numeric Conversion (Fixes the SMC Math failure)
                 df = pd.DataFrame(candles)
                 return df[['open', 'high', 'low', 'close']].apply(pd.to_numeric)
-                
         except Exception as e:
-            print(f"❌ Deriv Connection Error ({clean_pair}): {e}")
+            print(f"❌ Deriv Error ({clean_pair}): {e}")
             return pd.DataFrame()
     else:
-        # Bybit Engine
+        # Bybit Engine (unchanged)
         try:
             tf = "5" if interval == "M5" else "D"
             resp = bybit.get_kline(category="linear", symbol=clean_pair, interval=tf, limit=100)
-            
-            # Use specific column indexing to avoid mapping errors
             df = pd.DataFrame(resp['result']['list'], columns=['ts','open','high','low','close','vol','turnover'])
             df = df[['open','high','low','close']].apply(pd.to_numeric)
-            return df.iloc[::-1] # Reverse to chronological order
+            return df.iloc[::-1]
         except Exception as e:
             print(f"❌ Bybit Error ({clean_pair}): {e}")
             return pd.DataFrame()
