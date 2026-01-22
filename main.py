@@ -95,18 +95,20 @@ async def fetch_data(pair, interval):
                         print(f"❌ Auth Error: {auth_res['error']['message']}")
                         return pd.DataFrame()
                 
-                # 5. Request Data
+                # 5. Request Data (FIXED: Added 'end' and 'adjust_start_time')
                 await ws.send(json.dumps({
-                    "ticks_history": clean_pair, 
-                    "count": 100, 
-                    "style": "candles", 
+                    "ticks_history": clean_pair,
+                    "adjust_start_time": 1,
+                    "count": 100,
+                    "end": "latest",
+                    "style": "candles",
                     "granularity": gran
                 }))
                 
                 res = json.loads(await ws.recv())
                 candles = res.get("candles", [])
                 
-                # 6. Error Trapping (Prints ACTUAL error from Deriv)
+                # 6. Error Trapping
                 if not candles:
                     if "error" in res:
                         print(f"⚠️ Deriv Error ({clean_pair}): {res['error']['message']}")
@@ -225,7 +227,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # State Processing
     elif state == "add":
-        # No need to add prefixes here, the fetch_data function handles it dynamically
         user["pairs"].append(text.upper())
         save_users(users)
         RUNTIME_STATE[uid] = None
