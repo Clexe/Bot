@@ -90,9 +90,10 @@ async def fetch_data(pair, interval):
                 res = json.loads(await ws.recv())
                 candles = res.get("candles", [])
                 
-                if not candles:
-                    print(f"⚠️ Deriv: No data for {clean_pair}")
-                    return pd.DataFrame()
+               if not candles:
+    # This prints the raw response so we know if it's "Invalid Token" or "Market Closed"
+    print(f"⚠️ Deriv Error for {clean_pair}: {res}") 
+    return pd.DataFrame()
                 
                 df = pd.DataFrame(candles)
                 return df[['open', 'high', 'low', 'close']].apply(pd.to_numeric)
