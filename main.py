@@ -50,33 +50,65 @@ def is_in_session(session_type):
     return True 
 
 # =====================
-# SMART ROUTER & STRATEGY
+# UPDATED SMART ROUTER
 # =====================
 async def fetch_data(pair, interval):
     clean_pair = pair.replace("/", "").upper().strip()
+    # Identification logic for Deriv assets
     is_deriv = any(x in clean_pair for x in ["XAU", "EUR", "GBP", "JPY", "R_", "V75", "1S"])
     
     if is_deriv:
+        # Standardize prefix for Forex/Metals
         if any(x in clean_pair for x in ["XAU", "EUR", "GBP", "JPY"]) and not clean_pair.startswith("frx"):
             clean_pair = "frx" + clean_pair
+            
         uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
         gran = 300 if interval == "M5" else 86400
+        
         try:
             async with websockets.connect(uri) as ws:
+                # 1. Authorization Loop (Wait for confirmation)
                 await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
-                await ws.recv()
-                await ws.send(json.dumps({"ticks_history": clean_pair, "count": 100, "style": "candles", "granularity": gran}))
+                while True:
+                    auth_res = json.loads(await ws.recv())
+                    if "authorize" in auth_res:
+                        break 
+                
+                # 2. Request Data
+                await ws.send(json.dumps({
+                    "ticks_history": clean_pair, 
+                    "count": 100, 
+                    "style": "candles", 
+                    "granularity": gran
+                }))
+                
                 res = json.loads(await ws.recv())
-                return pd.DataFrame(res.get("candles", []))
-        except: return pd.DataFrame()
+                candles = res.get("candles", [])
+                
+                if not candles:
+                    print(f"⚠️ Deriv: No data returned for {clean_pair}")
+                    return pd.DataFrame()
+                
+                # 3. Numeric Conversion (Fixes the SMC Math failure)
+                df = pd.DataFrame(candles)
+                return df[['open', 'high', 'low', 'close']].apply(pd.to_numeric)
+                
+        except Exception as e:
+            print(f"❌ Deriv Connection Error ({clean_pair}): {e}")
+            return pd.DataFrame()
     else:
+        # Bybit Engine
         try:
             tf = "5" if interval == "M5" else "D"
             resp = bybit.get_kline(category="linear", symbol=clean_pair, interval=tf, limit=100)
-            df = pd.DataFrame(resp['result']['list'], columns=['ts','o','h','l','c','v','t'])
-            df.rename(columns={'o':'open','h':'high','l':'low','c':'close'}, inplace=True)
-            return df.iloc[::-1].apply(pd.to_numeric)
-        except: return pd.DataFrame()
+            
+            # Use specific column indexing to avoid mapping errors
+            df = pd.DataFrame(resp['result']['list'], columns=['ts','open','high','low','close','vol','turnover'])
+            df = df[['open','high','low','close']].apply(pd.to_numeric)
+            return df.iloc[::-1] # Reverse to chronological order
+        except Exception as e:
+            print(f"❌ Bybit Error ({clean_pair}): {e}")
+            return pd.DataFrame()
 
 def get_smc_signal(df_l, df_h, pair):
     if df_l.empty or df_h.empty: return None
