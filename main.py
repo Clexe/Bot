@@ -50,7 +50,7 @@ def is_in_session(session_type):
     return True 
 
 # =====================
-# SMART ROUTER ENGINE
+# SMART ROUTER & STRATEGY
 # =====================
 async def fetch_data(pair, interval):
     clean_pair = pair.replace("/", "").upper().strip()
@@ -78,47 +78,56 @@ async def fetch_data(pair, interval):
             return df.iloc[::-1].apply(pd.to_numeric)
         except: return pd.DataFrame()
 
+def get_smc_signal(df_l, df_h, pair):
+    if df_l.empty or df_h.empty: return None
+    pip_val = 100 if any(x in pair for x in ["JPY", "V75", "R_"]) else 10000
+    bias = "BULL" if df_h['close'].iloc[-1] > df_h['close'].iloc[-20] else "BEAR"
+    c1, c3 = df_l.iloc[-3], df_l.iloc[-1]
+    
+    if bias == "BULL" and c3.low > c1.high:
+        return {"act": "BUY", "e": c3.close, "tp": df_h['high'].max(), "sl": c1.high - (10/pip_val), "be": c3.close + (30/pip_val)}
+    if bias == "BEAR" and c3.high < c1.low:
+        return {"act": "SELL", "e": c3.close, "tp": df_h['low'].min(), "sl": c1.low + (10/pip_val), "be": c3.close - (30/pip_val)}
+    return None
+
 # =====================
-# THE 10 COMMAND HANDLER
+# THE 10 COMMANDS
 # =====================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_chat.id); text = update.message.text.lower().strip()
     users = load_users(); user = get_user(users, uid); state = RUNTIME_STATE.get(uid)
 
-    # 1. STATUS
-    if text == "status":
+    # Functions 1-10 explicitly defined
+    if text == "status": # 1
         time_diff = int(time.time() - LAST_SCAN_TIME)
-        status_text = "🟢 SCANNING..." if IS_SCANNING else f"⏳ IDLE ({max(0, user['scan_interval'] - time_diff)}s left)"
-        await update.message.reply_text(f"🤖 *System Status*\nStatus: {status_text}\nPairs: {len(user['pairs'])}\nSession: {user['session']}")
+        status_text = "🟢 SCANNING" if IS_SCANNING else f"⏳ IDLE ({max(0, user['scan_interval'] - time_diff)}s)"
+        await update.message.reply_text(f"🤖 *Status*\nScanner: {status_text}\nPairs: {len(user['pairs'])}\nSession: {user['session']}")
+    elif text == "add": # 2
+        RUNTIME_STATE[uid] = "add"
+        await update.message.reply_text("Enter Symbol (BTCUSDT, XAUUSD):")
+    elif text == "remove": # 3
+        RUNTIME_STATE[uid] = "remove"
+        await update.message.reply_text("Symbol to remove:")
+    elif text == "pairs": # 4
+        await update.message.reply_text(f"📊 Watchlist: {', '.join(user['pairs']) or 'Empty'}")
+    elif text == "markets": # 5
+        await update.message.reply_text("📡 Bybit: Crypto | Deriv: Forex/Synthetics")
+    elif text == "setsession": # 6
+        RUNTIME_STATE[uid] = "session"
+        await update.message.reply_text("Enter LONDON, NY, or BOTH:")
+    elif text == "setscan": # 7
+        RUNTIME_STATE[uid] = "scan"
+        await update.message.reply_text("Enter Scan seconds:")
+    elif text == "setcooldown": # 8
+        RUNTIME_STATE[uid] = "cooldown"
+        await update.message.reply_text("Enter Cooldown minutes:")
+    elif text == "setspread": # 9
+        RUNTIME_STATE[uid] = "spread"
+        await update.message.reply_text("Enter Max Spread (e.g. 0.0005):")
+    elif text == "help": # 10
+        await update.message.reply_text("SMC Sniper: M5 FVG entries aligned with Daily Bias.")
     
-    # 2. ADD
-    elif text == "add": RUNTIME_STATE[uid] = "add"; await update.message.reply_text("Enter Symbol (BTCUSDT, XAUUSD):")
-    
-    # 3. REMOVE
-    elif text == "remove": RUNTIME_STATE[uid] = "remove"; await update.message.reply_text("Enter Symbol to remove:")
-    
-    # 4. PAIRS
-    elif text == "pairs": await update.message.reply_text(f"📊 *Watchlist:* {', '.join(user['pairs']) or 'Empty'}")
-    
-    # 5. MARKETS
-    elif text == "markets": await update.message.reply_text("📡 *Exchanges:* Bybit (Crypto), Deriv (Forex/Synthetics)")
-    
-    # 6. SET SESSION
-    elif text == "setsession": RUNTIME_STATE[uid] = "session"; await update.message.reply_text("Enter: LONDON, NY, or BOTH")
-    
-    # 7. SET SCAN
-    elif text == "setscan": RUNTIME_STATE[uid] = "scan"; await update.message.reply_text("Enter Scan Interval (seconds):")
-    
-    # 8. SET COOLDOWN
-    elif text == "setcooldown": RUNTIME_STATE[uid] = "cooldown"; await update.message.reply_text("Enter Cooldown (minutes):")
-    
-    # 9. SET SPREAD
-    elif text == "setspread": RUNTIME_STATE[uid] = "spread"; await update.message.reply_text("Enter Max Spread (e.g., 0.0005):")
-    
-    # 10. HELP
-    elif text == "help": await update.message.reply_text("SMC Sniper: M5 FVG entries aligned with Daily Bias. Targets 100 RR Liquidity.")
-
-    # State Processing Logic
+    # State Processing
     elif state == "add":
         user["pairs"].append(text.upper()); save_users(users); RUNTIME_STATE[uid] = None
         await update.message.reply_text(f"✅ {text.upper()} added.")
@@ -127,16 +136,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         RUNTIME_STATE[uid] = None; await update.message.reply_text(f"🗑 {text.upper()} removed.")
     elif state == "session":
         user["session"] = text.upper(); save_users(users); RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Session set to {text.upper()}")
+        await update.message.reply_text(f"✅ Session: {text.upper()}")
     elif state == "scan":
         user["scan_interval"] = int(text); save_users(users); RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Scan interval set to {text}s")
+        await update.message.reply_text(f"✅ Scan set.")
     elif state == "cooldown":
         user["cooldown"] = int(text); save_users(users); RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Cooldown set to {text}m")
+        await update.message.reply_text(f"✅ Cooldown set.")
     elif state == "spread":
         user["max_spread"] = float(text); save_users(users); RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Max spread set to {text}")
+        await update.message.reply_text(f"✅ Spread set.")
 
 # =====================
 # ENGINE & SCANNER
@@ -149,11 +158,17 @@ async def scanner_loop(app):
             users = load_users()
             for uid, settings in users.items():
                 if not is_in_session(settings["session"]): continue
-                print(f"🔍 Scanning watchlist for {uid}...")
+                print(f"🔍 [SCAN START] User {uid} | {len(settings['pairs'])} pairs")
                 for pair in settings["pairs"]:
-                    df_l = await fetch_data(pair, "M5")
-                    df_h = await fetch_data(pair, "1D")
-                    # (Insert Strategy: get_smc_signal logic here)
+                    exchange = "DERIV" if any(x in pair.upper() for x in ["R_", "V75", "XAU", "EUR", "GBP"]) else "BYBIT"
+                    print(f"  ➡️ Checking {pair} on {exchange}...")
+                    df_l = await fetch_data(pair, "M5"); df_h = await fetch_data(pair, "1D")
+                    sig = get_smc_signal(df_l, df_h, pair)
+                    if sig and SENT_SIGNALS.get(f"{uid}_{pair}") != sig['e']:
+                        msg = f"🚨 *SMC SIGNAL: {pair}*\n{sig['act']} @ `{sig['e']}`\nTP: `{sig['tp']}` | SL: `{sig['sl']}`"
+                        await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN)
+                        SENT_SIGNALS[f"{uid}_{pair}"] = sig['e']
+                        print(f"  🎯 SIGNAL TRIGGERED: {pair}")
             IS_SCANNING = False; await asyncio.sleep(60)
         except Exception as e: print(f"Error: {e}"); await asyncio.sleep(10)
 
@@ -162,7 +177,7 @@ async def post_init(app: Application):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("SMC Terminal Online", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("add"), KeyboardButton("remove"), KeyboardButton("pairs")], [KeyboardButton("status"), KeyboardButton("setsession"), KeyboardButton("markets")], [KeyboardButton("setscan"), KeyboardButton("setcooldown"), KeyboardButton("setspread")], [KeyboardButton("help")]], resize_keyboard=True))))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Sniper Ready", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("add"), KeyboardButton("remove"), KeyboardButton("pairs")], [KeyboardButton("status"), KeyboardButton("setsession"), KeyboardButton("markets")], [KeyboardButton("setscan"), KeyboardButton("setcooldown"), KeyboardButton("setspread")], [KeyboardButton("help")]], resize_keyboard=True))))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.post_init = post_init
     app.run_polling()
