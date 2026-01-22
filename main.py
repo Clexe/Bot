@@ -1,4 +1,5 @@
 import os, json, asyncio, websockets, time
+from datetime import datetime
 import pandas as pd
 from pybit.unified_trading import HTTP
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
@@ -16,7 +17,7 @@ BYBIT_SECRET = os.getenv("BYBIT_API_SECRET")
 DATA_FILE = "users.json"
 
 bybit = HTTP(testnet=False, api_key=BYBIT_KEY, api_secret=BYBIT_SECRET)
-SENT_SIGNALS = {}
+SENT_SIGNALS = {} # Format: {uid_pair: timestamp}
 RUNTIME_STATE = {}
 
 # =====================
@@ -33,124 +34,127 @@ def save_users(data):
 
 def get_user(users, chat_id):
     if chat_id not in users:
-        users[chat_id] = {"pairs": [], "scan_interval": 60, "max_spread": 0.0005}
+        users[chat_id] = {
+            "pairs": [], "scan_interval": 60, "cooldown": 60, 
+            "max_spread": 0.0005, "session": "BOTH"
+        }
         save_users(users)
     return users[chat_id]
 
-# =====================
-# EXCHANGE ENGINES
-# =====================
-async def get_bybit_data(symbol, interval="5"):
-    try:
-        # Fetches 100 candles (M5 or Daily)
-        resp = bybit.get_kline(category="linear", symbol=symbol.replace("/", ""), interval=interval, limit=100)
-        df = pd.DataFrame(resp['result']['list'], columns=['ts','o','h','l','c','v','t'])
-        for col in ['o','h','l','c']: df[col] = pd.to_numeric(df[col])
-        df.rename(columns={'o':'open','h':'high','l':'low','c':'close'}, inplace=True)
-        return df.iloc[::-1] # Reverse to correct order
-    except: return pd.DataFrame()
+def is_in_session(session_type):
+    now_hour = datetime.utcnow().hour
+    if session_type == "LONDON": return 8 <= now_hour <= 16
+    if session_type == "NY": return 13 <= now_hour <= 21
+    return True 
 
-async def get_deriv_data(symbol, interval=300):
-    uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
-    try:
+# =====================
+# EXCHANGE & STRATEGY
+# =====================
+async def fetch_data(pair, interval):
+    if any(x in pair for x in ["R_", "V75", "1S"]): # Deriv
+        uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+        gran = 300 if interval == "M5" else 86400
         async with websockets.connect(uri) as ws:
             await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
             await ws.recv()
-            await ws.send(json.dumps({"ticks_history": symbol, "count": 100, "end": "latest", "style": "candles", "granularity": interval}))
-            res = await ws.recv(); data = json.loads(res)
-            if "candles" in data:
-                df = pd.DataFrame(data["candles"])
-                for col in ['open','high','low','close']: df[col] = pd.to_numeric(df[col])
-                return df
-            return pd.DataFrame()
-    except: return pd.DataFrame()
+            await ws.send(json.dumps({"ticks_history": pair, "count": 100, "style": "candles", "granularity": gran}))
+            res = json.loads(await ws.recv())
+            return pd.DataFrame(res.get("candles", []))
+    else: # Bybit
+        tf = "5" if interval == "M5" else "D"
+        resp = bybit.get_kline(category="linear", symbol=pair, interval=tf, limit=100)
+        df = pd.DataFrame(resp['result']['list'], columns=['ts','o','h','l','c','v','t'])
+        df.rename(columns={'o':'open','h':'high','l':'low','c':'close'}, inplace=True)
+        return df.iloc[::-1].apply(pd.to_numeric)
 
-# =====================
-# SMC STRATEGY LOGIC
-# =====================
-def get_sniper_signal(df_lt, df_ht, symbol):
-    if df_lt.empty or df_ht.empty: return None
-    pip_val = 100 if any(x in symbol for x in ["JPY", "V75", "R_"]) else 10000
-    
-    # 1. HTF Daily Bias (SMC Orderflow)
-    ht_trend = "BULL" if df_ht['close'].iloc[-1] > df_ht['close'].iloc[-20] else "BEAR"
-    tp_buy, tp_sell = df_ht['high'].max(), df_ht['low'].min()
-    
-    # 2. LTF M5 FVG Detection
-    c1, c2, c3 = df_lt.iloc[-3], df_lt.iloc[-2], df_lt.iloc[-1]
+def get_smc_signal(df_l, df_h, pair):
+    if df_l.empty or df_h.empty: return None
+    pip_val = 100 if any(x in pair for x in ["JPY", "V75", "R_"]) else 10000
+    bias = "BULL" if df_h['close'].iloc[-1] > df_h['close'].iloc[-20] else "BEAR"
+    c1, c3 = df_l.iloc[-3], df_l.iloc[-1]
     curr = c3.close
-    sl_gap = 10 / pip_val
-
-    # Buy: Bullish FVG + Trend Alignment + TP Sanity Check
-    if ht_trend == "BULL" and c3.low > c1.high and tp_buy > curr:
-        return {"action": "BUY", "entry": curr, "tp": tp_buy, "sl": c1.high - sl_gap, "be": curr + (30/pip_val)}
     
-    # Sell: Bearish FVG + Trend Alignment + TP Sanity Check
-    if ht_trend == "BEAR" and c3.high < c1.low and tp_sell < curr:
-        return {"action": "SELL", "entry": curr, "tp": tp_sell, "sl": c1.low + sl_gap, "be": curr - (30/pip_val)}
+    # FVG + Bias Alignment
+    if bias == "BULL" and c3.low > c1.high:
+        return {"act": "BUY", "e": curr, "tp": df_h['high'].max(), "sl": c1.high - (10/pip_val)}
+    if bias == "BEAR" and c3.high < c1.low:
+        return {"act": "SELL", "e": curr, "tp": df_h['low'].min(), "sl": c1.low + (10/pip_val)}
     return None
 
 # =====================
-# TELEGRAM UI
+# UI HANDLERS
 # =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    get_user(load_users(), str(update.effective_chat.id))
-    kb = [[KeyboardButton("/add"), KeyboardButton("/remove"), KeyboardButton("/pairs")],
-          [KeyboardButton("/status"), KeyboardButton("/setscan"), KeyboardButton("/help")]]
-    await update.message.reply_text("💹 *SMC Sniper Terminal Active*", 
+    kb = [[KeyboardButton("add"), KeyboardButton("remove"), KeyboardButton("pairs")],
+          [KeyboardButton("setsession"), KeyboardButton("setscan"), KeyboardButton("setcooldown")],
+          [KeyboardButton("setspread"), KeyboardButton("markets"), KeyboardButton("help")]]
+    await update.message.reply_text("💹 *Sniper Bot v2.0 Active*", 
                                    reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), 
                                    parse_mode=ParseMode.MARKDOWN)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_chat.id); text = update.message.text
+    uid = str(update.effective_chat.id); text = update.message.text.lower().strip()
     users = load_users(); user = get_user(users, uid); state = RUNTIME_STATE.get(uid)
 
-    if text == "/status":
-        await update.message.reply_text(f"🤖 *Status:* Online\n📡 *Scanning:* {len(user['pairs'])} pairs")
-    elif text == "/add":
+    if text == "add":
         RUNTIME_STATE[uid] = "add"
-        await update.message.reply_text("Send Symbol (e.g. BTCUSDT):")
+        await update.message.reply_text("Enter Symbol (e.g. BTCUSDT):")
+    elif text == "remove":
+        RUNTIME_STATE[uid] = "remove"
+        await update.message.reply_text("Enter Symbol to remove:")
+    elif text == "pairs":
+        await update.message.reply_text(f"Watchlist: {', '.join(user['pairs']) or 'Empty'}")
+    elif text == "setsession":
+        RUNTIME_STATE[uid] = "session"
+        await update.message.reply_text("Enter LONDON, NY, or BOTH:")
+    elif text == "setscan":
+        RUNTIME_STATE[uid] = "scan"
+        await update.message.reply_text("Enter scan interval (seconds):")
+    elif text == "setcooldown":
+        RUNTIME_STATE[uid] = "cooldown"
+        await update.message.reply_text("Enter cooldown (minutes):")
+    elif text == "setspread":
+        RUNTIME_STATE[uid] = "spread"
+        await update.message.reply_text("Enter max spread (e.g. 0.0005):")
+    elif text == "markets":
+        await update.message.reply_text("📡 Active: Bybit (Crypto) & Deriv (Forex/Synthetics)")
+    elif text == "help":
+        await update.message.reply_text("Use buttons to configure. Bot scans M5 for FVG entries aligned with Daily Bias.")
+    
+    # Process Inputs
     elif state == "add":
-        pair = text.upper().strip()
-        if pair not in user["pairs"]: user["pairs"].append(pair); save_users(users)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ {pair} Added.")
+        user["pairs"].append(text.upper()); save_users(users); RUNTIME_STATE[uid] = None
+        await update.message.reply_text(f"✅ {text.upper()} added.")
+    elif state == "session":
+        user["session"] = text.upper(); save_users(users); RUNTIME_STATE[uid] = None
+        await update.message.reply_text(f"✅ Session: {text.upper()}")
 
 # =====================
-# SCANNER LOOP & DEPLOYMENT
+# ENGINE
 # =====================
 async def scanner_loop(app):
-    print("🚀 Scanner Engine Started...")
     while True:
-        try:
-            users = load_users()
-            for uid, settings in users.items():
-                for pair in settings["pairs"]:
-                    if any(x in pair for x in ["R_", "V75"]):
-                        df_l = await get_deriv_data(pair, 300)
-                        df_h = await get_deriv_data(pair, 86400)
-                    else:
-                        df_l = await get_bybit_data(pair, "5")
-                        df_h = await get_bybit_data(pair, "D")
-                    
-                    sig = get_sniper_signal(df_l, df_h, pair)
-                    if sig and SENT_SIGNALS.get(f"{uid}_{pair}") != sig['entry']:
-                        msg = (f"🚨 *SMC SNIPER: {pair}*\nAction: {sig['action']}\n\n"
-                               f"E: `{sig['entry']}`\nTP: `{sig['tp']}`\nSL: `{sig['sl']}`\n🛡 *BE:* `{sig['be']}`")
-                        await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN)
-                        SENT_SIGNALS[f"{uid}_{pair}"] = sig['entry']
-            await asyncio.sleep(60)
-        except Exception as e: print(f"Error: {e}"); await asyncio.sleep(10)
+        users = load_users()
+        for uid, settings in users.items():
+            if not is_in_session(settings["session"]): continue
+            for pair in settings["pairs"]:
+                df_l = await fetch_data(pair, "M5")
+                df_h = await fetch_data(pair, "1D")
+                sig = get_smc_signal(df_l, df_h, pair)
+                if sig and SENT_SIGNALS.get(f"{uid}_{pair}") != sig['e']:
+                    msg = f"🚨 *SMC SIGNAL: {pair}*\n{sig['act']} @ `{sig['e']}`\nTP: `{sig['tp']}`\nSL: `{sig['sl']}`"
+                    await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN)
+                    SENT_SIGNALS[f"{uid}_{pair}"] = sig['e']
+        await asyncio.sleep(60)
 
 async def post_init(app: Application):
-    loop = asyncio.get_event_loop()
-    loop.create_task(scanner_loop(app))
+    asyncio.get_event_loop().create_task(scanner_loop(app))
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.post_init = post_init
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling()
 
 if __name__ == "__main__": main()
