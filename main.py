@@ -298,7 +298,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Spread set.")
 
 # =====================
-# ENGINE & SCANNER (OPTIMIZED)
+# ENGINE & SCANNER (WITH SPAM PROTECTION)
 # =====================
 async def scanner_loop(app):
     global LAST_SCAN_TIME, IS_SCANNING
@@ -308,56 +308,69 @@ async def scanner_loop(app):
             LAST_SCAN_TIME = time.time()
             users = load_users()
             
-            # --- PHASE 1: PRE-CALCULATION (Loop Inversion) ---
-            # Group users by PAIR to minimize API calls.
+            # --- PHASE 1: PRE-CALCULATION ---
             pair_map = {}
-            
             for uid, settings in users.items():
                 if not is_in_session(settings["session"]): continue
                 for pair in settings["pairs"]:
                     clean_p = pair.upper()
-                    if clean_p not in pair_map:
-                        pair_map[clean_p] = []
+                    if clean_p not in pair_map: pair_map[clean_p] = []
                     pair_map[clean_p].append(uid)
             
             if pair_map:
                 print(f"🔍 [SCAN START] Checking {len(pair_map)} unique pairs...")
 
-            # --- PHASE 2: EFFICIENT SCANNING ---
+            # --- PHASE 2: SCANNING ---
             for pair, recipients in pair_map.items():
-                
-                # Market Filter (Skip closed markets to save resources)
-                if not is_market_open(pair):
-                    continue
+                if not is_market_open(pair): continue
 
-                # Exchange Detection for Logs
                 deriv_keys = ["FRX", "R_", "V75", "XAU", "EUR", "GBP", "JPY", "US30", "NAS", "GER", "AUD", "CAD"]
                 exchange = "DERIV" if any(x in pair.upper() for x in deriv_keys) else "BYBIT"
                 
                 print(f"  ➡️ Checking {pair} on {exchange}...")
                 
-                # Fetch Data (ONCE per pair)
+                # Fetch Data
                 df_l = await fetch_data(pair, "M5")
                 df_h = await fetch_data(pair, "1D")
                 
                 # Get Signal
                 sig = get_smc_signal(df_l, df_h, pair)
                 
-                # --- PHASE 3: BROADCAST ---
+                # --- PHASE 3: BROADCAST (FIXED SPAM LOGIC) ---
                 if sig:
-                    sig_key = f"{pair}_{sig['e']}"
+                    current_time = time.time()
                     
                     for uid in recipients:
-                        # Check if user already got THIS signal
-                        last_sent = SENT_SIGNALS.get(f"{uid}_{pair}")
+                        # Retrieve last signal info
+                        last_info = SENT_SIGNALS.get(f"{uid}_{pair}")
                         
-                        if last_sent != sig['e']:
+                        # COOLDOWN CHECK:
+                        # If we sent a signal less than 5 minutes (300s) ago, SKIP IT.
+                        # This prevents spamming the same candle 5 times.
+                        should_send = False
+                        
+                        if last_info is None:
+                            should_send = True
+                        elif isinstance(last_info, dict):
+                            # Check time difference (300 seconds = 5 mins)
+                            if (current_time - last_info['time']) > 300:
+                                should_send = True
+                        else:
+                            # Fallback for old data format
+                            should_send = True
+
+                        if should_send:
                             msg = (f"🚨 *SMC SIGNAL: {pair}*\n"
                                    f"{sig['act']} @ `{sig['e']}`\n"
                                    f"TP: `{sig['tp']}` | SL: `{sig['sl']}`")
                             try:
                                 await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN)
-                                SENT_SIGNALS[f"{uid}_{pair}"] = sig['e']
+                                
+                                # SAVE TIME AND PRICE to block duplicates
+                                SENT_SIGNALS[f"{uid}_{pair}"] = {
+                                    'price': sig['e'],
+                                    'time': current_time
+                                }
                                 print(f"  🎯 Sent {pair} signal to User {uid}")
                             except Exception as e:
                                 print(f"  ❌ Failed to send to {uid}: {e}")
