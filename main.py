@@ -115,7 +115,7 @@ async def fetch_data(pair, interval):
             return df.iloc[::-1]
         except: return pd.DataFrame()
 
-# === 🧠 MSNR ENGINE (Market Structure + Retest) ===
+# === 🧠 MSNR ENGINE (Market Structure + Retest + CLAMPED SL) ===
 def get_smc_signal(df_l, df_h, pair):
     if df_l.empty or df_h.empty: return None
     pip_val = 100 if any(x in pair.upper() for x in ["JPY", "V75", "R_"]) else 10000
@@ -133,13 +133,36 @@ def get_smc_signal(df_l, df_h, pair):
     # 3. Entry Logic (Retest into FVG)
     c1, c3 = df_l.iloc[-3], df_l.iloc[-1]
     
+    # Define max risk in price (50 pips)
+    max_risk_price = 50 / pip_val 
+
     if bias == "BULL" and bullish_bos:
         if c3.low > c1.high: 
-            return {"act": "BUY", "e": c3.close, "tp": df_h['high'].max(), "sl": swing_low, "be": c3.close + (30/pip_val)}
+            entry = c3.close
+            raw_sl = swing_low
+            
+            # --- CLAMP LOGIC START ---
+            if (entry - raw_sl) > max_risk_price:
+                final_sl = entry - max_risk_price # Clamp to 50 pips
+            else:
+                final_sl = raw_sl
+            # --- CLAMP LOGIC END ---
+
+            return {"act": "BUY", "e": entry, "tp": df_h['high'].max(), "sl": final_sl, "be": c3.close + (30/pip_val)}
 
     if bias == "BEAR" and bearish_bos:
         if c3.high < c1.low:
-            return {"act": "SELL", "e": c3.close, "tp": df_h['low'].min(), "sl": swing_high, "be": c3.close - (30/pip_val)}
+            entry = c3.close
+            raw_sl = swing_high
+            
+            # --- CLAMP LOGIC START ---
+            if (raw_sl - entry) > max_risk_price:
+                final_sl = entry + max_risk_price # Clamp to 50 pips
+            else:
+                final_sl = raw_sl
+            # --- CLAMP LOGIC END ---
+
+            return {"act": "SELL", "e": entry, "tp": df_h['low'].min(), "sl": final_sl, "be": c3.close - (30/pip_val)}
             
     return None
 
@@ -200,7 +223,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `setsession` - Filter by London/NY hours\n"
             "• `setscan` - Change speed (default 60s)\n\n"
             "🧠 *Strategy:* M15 MSNR\n"
-            "Waits for Daily Bias + BOS + Retest into FVG."
+            "Waits for Daily Bias + BOS + Retest into FVG.\n"
+            "🛡️ *Safety:* Max SL Risk capped at 50 pips."
         )
         await update.message.reply_text(help_msg, parse_mode=ParseMode.MARKDOWN)
     
@@ -310,5 +334,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__": 
-    main()
     main()
