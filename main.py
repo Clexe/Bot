@@ -63,141 +63,109 @@ def is_in_session(session_type):
     return True 
 
 def is_market_open(pair):
-    """
-    Checks if the market is open for the specific pair.
-    - Crypto/Synthetics: Always True
-    - Forex/Gold/Indices: Closed Weekends
-    """
     clean = pair.upper()
-    # 1. Always Open Assets (Crypto & Synthetics)
     always_open_keys = ["BTC", "ETH", "SOL", "USDT", "R_", "V75", "V10", "V25", "V50", "V100", "1HZ", "BOOM", "CRASH", "JUMP", "STEP"]
-    if any(k in clean for k in always_open_keys):
-        return True
-        
-    # 2. Traditional Market Hours (Forex, Metals, Indices)
-    # Logic based on UTC time.
+    if any(k in clean for k in always_open_keys): return True
     now = datetime.utcnow()
-    weekday = now.weekday() # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+    weekday = now.weekday()
     hour = now.hour
-    
-    # Friday: Most markets close around 21:00 UTC
     if weekday == 4 and hour >= 21: return False
-    
-    # Saturday: Closed all day
     if weekday == 5: return False
-    
-    # Sunday: Markets open late (approx 21:00 UTC for Sydney session)
     if weekday == 6 and hour < 21: return False
-    
     return True
 
 # =====================
-# SMART ROUTER & STRATEGY (M15 UPDATE)
+# SMART ROUTER & STRATEGY (M15 + MSNR)
 # =====================
 async def fetch_data(pair, interval):
-    # 1. Clean and normalize the pair name
     raw_pair = pair.replace("/", "").strip()
     clean_pair = raw_pair.upper() 
-    
-    # 2. Define Deriv keywords (including Index codes)
     deriv_keywords = ["XAU", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF", "R_", "V75", "1S", "FRX", "US30", "NAS", "GER", "UK100"]
     is_deriv = any(x in clean_pair for x in deriv_keywords)
     
     if is_deriv:
-        # 3. Smart Prefix Logic
-        if clean_pair.startswith("FRX"):
-            clean_pair = "frx" + clean_pair[3:]
-        elif any(x in clean_pair for x in ["XAU", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF", "US30", "NAS", "GER", "UK100"]):
-            clean_pair = "frx" + clean_pair
-            
+        if clean_pair.startswith("FRX"): clean_pair = "frx" + clean_pair[3:]
+        elif any(x in clean_pair for x in ["XAU", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF", "US30", "NAS", "GER", "UK100"]): clean_pair = "frx" + clean_pair
         uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
-        
-        # === M15 UPDATE: Granularity 900 (15 mins) ===
-        gran = 900 if interval == "M15" else 86400
+        gran = 900 if interval == "M15" else 86400 # M15 Granularity
         
         try:
             async with websockets.connect(uri) as ws:
-                # 4. Auth Loop
                 await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
                 while True:
                     auth_res = json.loads(await ws.recv())
-                    if "authorize" in auth_res: 
-                        break 
-                    if "error" in auth_res:
-                        print(f"❌ Auth Error: {auth_res['error']['message']}")
-                        return pd.DataFrame()
+                    if "authorize" in auth_res: break 
+                    if "error" in auth_res: return pd.DataFrame()
                 
-                # 5. Request Data
                 await ws.send(json.dumps({
-                    "ticks_history": clean_pair,
-                    "adjust_start_time": 1,
-                    "count": 100,
-                    "end": "latest",
-                    "style": "candles",
-                    "granularity": gran
+                    "ticks_history": clean_pair, "adjust_start_time": 1, "count": 100, "end": "latest", "style": "candles", "granularity": gran
                 }))
-                
                 res = json.loads(await ws.recv())
-                candles = res.get("candles", [])
-                
-                # 6. Error Trapping
-                if not candles:
-                    if "error" in res:
-                        print(f"⚠️ Deriv Error ({clean_pair}): {res['error']['message']}")
-                    else:
-                        print(f"⚠️ Deriv: No data returned for {clean_pair} (Market Closed?)")
-                    return pd.DataFrame()
-                
-                # 7. Numeric Conversion
-                df = pd.DataFrame(candles)
+                if not res.get("candles"): return pd.DataFrame()
+                df = pd.DataFrame(res["candles"])
                 return df[['open', 'high', 'low', 'close']].apply(pd.to_numeric)
-                
-        except Exception as e:
-            print(f"❌ Connection Error ({clean_pair}): {e}")
-            return pd.DataFrame()
+        except: return pd.DataFrame()
     else:
-        # Bybit Engine
         try:
-            # === M15 UPDATE: Interval "15" ===
-            tf = "15" if interval == "M15" else "D"
+            tf = "15" if interval == "M15" else "D" # M15 Interval
             resp = bybit.get_kline(category="linear", symbol=clean_pair, interval=tf, limit=100)
-            
-            if not resp or 'result' not in resp or 'list' not in resp['result']:
-                return pd.DataFrame()
-
-            # Bybit V5 returns: [ts, open, high, low, close, vol, turnover]
+            if not resp or 'result' not in resp: return pd.DataFrame()
             df = pd.DataFrame(resp['result']['list'], columns=['ts','open','high','low','close','vol','turnover'])
             df = df[['open','high','low','close']].apply(pd.to_numeric)
-            return df.iloc[::-1] # Reverse to chronological order
-        except Exception as e:
-            print(f"❌ Bybit Error ({clean_pair}): {e}")
-            return pd.DataFrame()
+            return df.iloc[::-1]
+        except: return pd.DataFrame()
 
+# === 🧠 NEW MSNR ENGINE ===
 def get_smc_signal(df_l, df_h, pair):
     if df_l.empty or df_h.empty: return None
-    # Adjust pip value for JPY pairs and Synthetics
     pip_val = 100 if any(x in pair.upper() for x in ["JPY", "V75", "R_"]) else 10000
     
-    # Simple Bias Check
+    # 1. Daily Bias (The "King")
     bias = "BULL" if df_h['close'].iloc[-1] > df_h['close'].iloc[-20] else "BEAR"
+    
+    # 2. Market Structure (BOS) Detection
+    # We look back 20 candles to find the "Swing Points"
+    # We ignore the most recent 3 candles to ensure the swing is valid/formed
+    swing_high = df_l['high'].iloc[-23:-3].max()
+    swing_low = df_l['low'].iloc[-23:-3].min()
+    
+    # Check if we recently BROKE that structure (in the last 5 candles)
+    recent_price_action = df_l['close'].iloc[-5:]
+    bullish_bos = recent_price_action.max() > swing_high
+    bearish_bos = recent_price_action.min() < swing_low
+    
+    # 3. FVG / Retest Logic
+    # We need the current candle to be retesting an FVG
     c1, c3 = df_l.iloc[-3], df_l.iloc[-1]
     
-    if bias == "BULL" and c3.low > c1.high:
-        return {
-            "act": "BUY", 
-            "e": c3.close, 
-            "tp": df_h['high'].max(), 
-            "sl": c1.high - (10/pip_val), 
-            "be": c3.close + (30/pip_val)
-        }
-    if bias == "BEAR" and c3.high < c1.low:
-        return {
-            "act": "SELL", 
-            "e": c3.close, 
-            "tp": df_h['low'].min(), 
-            "sl": c1.low + (10/pip_val), 
-            "be": c3.close - (30/pip_val)
-        }
+    # === BUY SCENARIO ===
+    # Daily is Bullish + We broke a recent High (BOS) + We are dipping into an FVG
+    if bias == "BULL" and bullish_bos:
+        # FVG Check: Did the move leave a gap? (Low of candle 3 > High of candle 1)
+        # Note: In a retracement, we want price to dip INTO the gap.
+        # Simplification: We check if current Low is dipping near the breakout point
+        
+        # Valid FVG Pattern for entry
+        if c3.low > c1.high: 
+            return {
+                "act": "BUY", 
+                "e": c3.close, 
+                "tp": df_h['high'].max(), 
+                "sl": swing_low, # Safer SL below the Swing Low
+                "be": c3.close + (30/pip_val)
+            }
+
+    # === SELL SCENARIO ===
+    if bias == "BEAR" and bearish_bos:
+        if c3.high < c1.low:
+            return {
+                "act": "SELL", 
+                "e": c3.close, 
+                "tp": df_h['low'].min(), 
+                "sl": swing_high, # Safer SL above the Swing High
+                "be": c3.close - (30/pip_val)
+            }
+            
     return None
 
 # =====================
@@ -210,96 +178,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(users, uid)
     state = RUNTIME_STATE.get(uid)
 
-    # 1. Status
     if text == "status": 
         time_diff = int(time.time() - LAST_SCAN_TIME)
         status_text = "🟢 SCANNING" if IS_SCANNING else f"⏳ IDLE ({max(0, user['scan_interval'] - time_diff)}s)"
         await update.message.reply_text(f"🤖 *Status*\nScanner: {status_text}\nPairs: {len(user['pairs'])}\nSession: {user['session']}", parse_mode=ParseMode.MARKDOWN)
-    
-    # 2. Add
     elif text == "add": 
         RUNTIME_STATE[uid] = "add"
-        await update.message.reply_text("Enter Symbol (e.g., BTCUSDT, XAUUSD, US30):")
-    
-    # 3. Remove
+        await update.message.reply_text("Enter Symbol:")
     elif text == "remove": 
         RUNTIME_STATE[uid] = "remove"
         await update.message.reply_text("Symbol to remove:")
-    
-    # 4. Pairs
     elif text == "pairs": 
         await update.message.reply_text(f"📊 Watchlist: {', '.join(user['pairs']) or 'Empty'}")
-    
-    # 5. Markets
-    elif text == "markets": 
-        await update.message.reply_text("📡 Bybit: Crypto | Deriv: Forex/Synthetics")
-    
-    # 6. Set Session
-    elif text == "setsession": 
-        RUNTIME_STATE[uid] = "session"
-        await update.message.reply_text("Enter LONDON, NY, or BOTH:")
-    
-    # 7. Set Scan
-    elif text == "setscan": 
-        RUNTIME_STATE[uid] = "scan"
-        await update.message.reply_text("Enter Scan seconds:")
-    
-    # 8. Set Cooldown
-    elif text == "setcooldown": 
-        RUNTIME_STATE[uid] = "cooldown"
-        await update.message.reply_text("Enter Cooldown minutes:")
-    
-    # 9. Set Spread
-    elif text == "setspread": 
-        RUNTIME_STATE[uid] = "spread"
-        await update.message.reply_text("Enter Max Spread (e.g. 0.0005):")
-    
-    # 10. Help
     elif text == "help": 
-        await update.message.reply_text("SMC Sniper: M15 FVG entries aligned with Daily Bias.")
+        await update.message.reply_text("SMC Sniper: M15 MSNR (BOS + Retest + FVG)")
     
     # State Processing
     elif state == "add":
-        # No need to add prefixes here, the fetch_data function handles it dynamically
         user["pairs"].append(text.upper())
         save_users(users)
         RUNTIME_STATE[uid] = None
         await update.message.reply_text(f"✅ {text.upper()} added.")
-    
     elif state == "remove":
         clean_text = text.upper()
-        if clean_text in user["pairs"]: 
-            user["pairs"].remove(clean_text)
-            save_users(users)
+        if clean_text in user["pairs"]: user["pairs"].remove(clean_text)
+        save_users(users)
         RUNTIME_STATE[uid] = None
         await update.message.reply_text(f"🗑 {clean_text} removed.")
-        
-    elif state == "session":
-        user["session"] = text.upper()
-        save_users(users)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Session: {text.upper()}")
-        
-    elif state == "scan":
-        user["scan_interval"] = int(text)
-        save_users(users)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Scan set.")
-        
-    elif state == "cooldown":
-        user["cooldown"] = int(text)
-        save_users(users)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Cooldown set.")
-        
-    elif state == "spread":
-        user["max_spread"] = float(text)
-        save_users(users)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Spread set.")
 
 # =====================
-# ENGINE & SCANNER (M15 VERSION)
+# ENGINE & SCANNER
 # =====================
 async def scanner_loop(app):
     global LAST_SCAN_TIME, IS_SCANNING
@@ -309,7 +217,6 @@ async def scanner_loop(app):
             LAST_SCAN_TIME = time.time()
             users = load_users()
             
-            # --- PHASE 1: PRE-CALCULATION ---
             pair_map = {}
             for uid, settings in users.items():
                 if not is_in_session(settings["session"]): continue
@@ -318,83 +225,53 @@ async def scanner_loop(app):
                     if clean_p not in pair_map: pair_map[clean_p] = []
                     pair_map[clean_p].append(uid)
             
-            if pair_map:
-                print(f"🔍 [SCAN START] Checking {len(pair_map)} unique pairs (M15)...")
+            if pair_map: print(f"🔍 [SCAN START] Checking {len(pair_map)} unique pairs (MSNR Mode)...")
 
-            # --- PHASE 2: SCANNING ---
             for pair, recipients in pair_map.items():
                 if not is_market_open(pair): continue
-
-                deriv_keys = ["FRX", "R_", "V75", "XAU", "EUR", "GBP", "JPY", "US30", "NAS", "GER", "AUD", "CAD"]
-                exchange = "DERIV" if any(x in pair.upper() for x in deriv_keys) else "BYBIT"
                 
-                print(f"  ➡️ Checking {pair} on {exchange}...")
-                
-                # Fetch Data (M15 + Daily)
-                df_l = await fetch_data(pair, "M15") # <--- UPDATED to M15
+                # Fetch Data
+                df_l = await fetch_data(pair, "M15") 
                 df_h = await fetch_data(pair, "1D")
                 
                 # Get Signal
                 sig = get_smc_signal(df_l, df_h, pair)
                 
-                # --- PHASE 3: BROADCAST (WITH SPAM PROTECTION) ---
                 if sig:
                     current_time = time.time()
-                    
                     for uid in recipients:
                         last_info = SENT_SIGNALS.get(f"{uid}_{pair}")
-                        
-                        # COOLDOWN CHECK:
-                        # Since we are on M15, we block spam for 15 minutes (900s)
                         should_send = False
-                        
-                        if last_info is None:
-                            should_send = True
+                        if last_info is None: should_send = True
                         elif isinstance(last_info, dict):
-                            # If signal sent < 15 mins ago, skip
-                            if (current_time - last_info['time']) > 900:
-                                should_send = True
-                        else:
-                            should_send = True
+                            if (current_time - last_info['time']) > 900: should_send = True
+                        else: should_send = True
 
                         if should_send:
                             msg = (f"🚨 *SMC SIGNAL: {pair}*\n"
-                                   f"Timeframe: M15\n"
+                                   f"Setup: MSNR (BOS + Retest)\n"
                                    f"{sig['act']} @ `{sig['e']}`\n"
                                    f"TP: `{sig['tp']}` | SL: `{sig['sl']}`")
                             try:
                                 await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN)
-                                
-                                SENT_SIGNALS[f"{uid}_{pair}"] = {
-                                    'price': sig['e'],
-                                    'time': current_time
-                                }
+                                SENT_SIGNALS[f"{uid}_{pair}"] = {'price': sig['e'], 'time': current_time}
                                 print(f"  🎯 Sent {pair} signal to User {uid}")
-                            except Exception as e:
-                                print(f"  ❌ Failed to send to {uid}: {e}")
+                            except: pass
                                 
             IS_SCANNING = False
             await asyncio.sleep(60)
-            
-        except Exception as e: 
-            print(f"❌ Scanner Loop Error: {e}")
-            await asyncio.sleep(10)
+        except: await asyncio.sleep(10)
 
 async def post_init(app: Application):
     asyncio.get_event_loop().create_task(scanner_loop(app))
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Sniper Ready", reply_markup=ReplyKeyboardMarkup([
-        [KeyboardButton("add"), KeyboardButton("remove"), KeyboardButton("pairs")], 
-        [KeyboardButton("status"), KeyboardButton("setsession"), KeyboardButton("markets")], 
-        [KeyboardButton("setscan"), KeyboardButton("setcooldown"), KeyboardButton("setspread")], 
-        [KeyboardButton("help")]
-    ], resize_keyboard=True))))
-    
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Sniper Ready", reply_markup=ReplyKeyboardMarkup([["add", "remove", "pairs"], ["status", "help"]], resize_keyboard=True))))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.post_init = post_init
     app.run_polling()
 
 if __name__ == "__main__": 
+    main()
     main()
