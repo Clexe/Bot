@@ -92,7 +92,7 @@ def is_market_open(pair):
     return True
 
 # =====================
-# SMART ROUTER & STRATEGY
+# SMART ROUTER & STRATEGY (M15 UPDATE)
 # =====================
 async def fetch_data(pair, interval):
     # 1. Clean and normalize the pair name
@@ -105,15 +105,15 @@ async def fetch_data(pair, interval):
     
     if is_deriv:
         # 3. Smart Prefix Logic
-        # If it starts with "FRX" (case insensitive check), fix casing to "frx"
         if clean_pair.startswith("FRX"):
             clean_pair = "frx" + clean_pair[3:]
-        # If it's a forex/metal/index without prefix, add "frx"
         elif any(x in clean_pair for x in ["XAU", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF", "US30", "NAS", "GER", "UK100"]):
             clean_pair = "frx" + clean_pair
             
         uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
-        gran = 300 if interval == "M5" else 86400
+        
+        # === M15 UPDATE: Granularity 900 (15 mins) ===
+        gran = 900 if interval == "M15" else 86400
         
         try:
             async with websockets.connect(uri) as ws:
@@ -127,7 +127,7 @@ async def fetch_data(pair, interval):
                         print(f"❌ Auth Error: {auth_res['error']['message']}")
                         return pd.DataFrame()
                 
-                # 5. Request Data (FIXED: Added 'end' and 'adjust_start_time')
+                # 5. Request Data
                 await ws.send(json.dumps({
                     "ticks_history": clean_pair,
                     "adjust_start_time": 1,
@@ -158,7 +158,8 @@ async def fetch_data(pair, interval):
     else:
         # Bybit Engine
         try:
-            tf = "5" if interval == "M5" else "D"
+            # === M15 UPDATE: Interval "15" ===
+            tf = "15" if interval == "M15" else "D"
             resp = bybit.get_kline(category="linear", symbol=clean_pair, interval=tf, limit=100)
             
             if not resp or 'result' not in resp or 'list' not in resp['result']:
@@ -255,7 +256,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # 10. Help
     elif text == "help": 
-        await update.message.reply_text("SMC Sniper: M5 FVG entries aligned with Daily Bias.")
+        await update.message.reply_text("SMC Sniper: M15 FVG entries aligned with Daily Bias.")
     
     # State Processing
     elif state == "add":
@@ -298,7 +299,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Spread set.")
 
 # =====================
-# ENGINE & SCANNER (WITH SPAM PROTECTION)
+# ENGINE & SCANNER (M15 VERSION)
 # =====================
 async def scanner_loop(app):
     global LAST_SCAN_TIME, IS_SCANNING
@@ -318,7 +319,7 @@ async def scanner_loop(app):
                     pair_map[clean_p].append(uid)
             
             if pair_map:
-                print(f"🔍 [SCAN START] Checking {len(pair_map)} unique pairs...")
+                print(f"🔍 [SCAN START] Checking {len(pair_map)} unique pairs (M15)...")
 
             # --- PHASE 2: SCANNING ---
             for pair, recipients in pair_map.items():
@@ -329,44 +330,41 @@ async def scanner_loop(app):
                 
                 print(f"  ➡️ Checking {pair} on {exchange}...")
                 
-                # Fetch Data
-                df_l = await fetch_data(pair, "M5")
+                # Fetch Data (M15 + Daily)
+                df_l = await fetch_data(pair, "M15") # <--- UPDATED to M15
                 df_h = await fetch_data(pair, "1D")
                 
                 # Get Signal
                 sig = get_smc_signal(df_l, df_h, pair)
                 
-                # --- PHASE 3: BROADCAST (FIXED SPAM LOGIC) ---
+                # --- PHASE 3: BROADCAST (WITH SPAM PROTECTION) ---
                 if sig:
                     current_time = time.time()
                     
                     for uid in recipients:
-                        # Retrieve last signal info
                         last_info = SENT_SIGNALS.get(f"{uid}_{pair}")
                         
                         # COOLDOWN CHECK:
-                        # If we sent a signal less than 5 minutes (300s) ago, SKIP IT.
-                        # This prevents spamming the same candle 5 times.
+                        # Since we are on M15, we block spam for 15 minutes (900s)
                         should_send = False
                         
                         if last_info is None:
                             should_send = True
                         elif isinstance(last_info, dict):
-                            # Check time difference (300 seconds = 5 mins)
-                            if (current_time - last_info['time']) > 300:
+                            # If signal sent < 15 mins ago, skip
+                            if (current_time - last_info['time']) > 900:
                                 should_send = True
                         else:
-                            # Fallback for old data format
                             should_send = True
 
                         if should_send:
                             msg = (f"🚨 *SMC SIGNAL: {pair}*\n"
+                                   f"Timeframe: M15\n"
                                    f"{sig['act']} @ `{sig['e']}`\n"
                                    f"TP: `{sig['tp']}` | SL: `{sig['sl']}`")
                             try:
                                 await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN)
                                 
-                                # SAVE TIME AND PRICE to block duplicates
                                 SENT_SIGNALS[f"{uid}_{pair}"] = {
                                     'price': sig['e'],
                                     'time': current_time
