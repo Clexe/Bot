@@ -144,7 +144,7 @@ def get_smc_signal(df_l, df_h, pair):
     return None
 
 # =====================
-# TELEGRAM HANDLERS (ALL RESTORED)
+# TELEGRAM HANDLERS (UPDATED HELP GUIDE)
 # =====================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_chat.id)
@@ -169,7 +169,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "pairs": 
         await update.message.reply_text(f"📊 Watchlist: {', '.join(user['pairs']) or 'Empty'}")
 
-    # 3. Settings (RESTORED)
+    # 3. Settings
     elif text == "markets": 
         await update.message.reply_text("📡 Bybit: Crypto | Deriv: Forex/Synthetics")
     elif text == "setsession": 
@@ -184,10 +184,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "setspread": 
         RUNTIME_STATE[uid] = "spread"
         await update.message.reply_text("Enter Max Spread (e.g. 0.0005):")
+        
+    # 4. HELP (UPDATED)
     elif text == "help": 
-        await update.message.reply_text("SMC Sniper: M15 MSNR (BOS + Retest)")
+        help_msg = (
+            "📚 *SMC SNIPER GUIDE*\n\n"
+            "🟢 *Quick Start:*\n"
+            "1. Type `add` -> Enter Symbol (e.g. `XAUUSD`)\n"
+            "2. Type `status` -> Check if scanner is running\n\n"
+            "⚙️ *Commands:*\n"
+            "• `add` - Add a pair to watchlist\n"
+            "• `remove` - Remove a pair\n"
+            "• `pairs` - View your active list\n"
+            "• `status` - Check connection & session\n"
+            "• `setsession` - Filter by London/NY hours\n"
+            "• `setscan` - Change speed (default 60s)\n\n"
+            "🧠 *Strategy:* M15 MSNR\n"
+            "Waits for Daily Bias + BOS + Retest into FVG."
+        )
+        await update.message.reply_text(help_msg, parse_mode=ParseMode.MARKDOWN)
     
-    # 4. State Processing (RESTORED)
+    # 5. State Processing
     elif state == "add":
         user["pairs"].append(text.upper())
         save_users(users)
@@ -293,4 +310,5 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__": 
+    main()
     main()
