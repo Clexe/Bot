@@ -115,61 +115,36 @@ async def fetch_data(pair, interval):
             return df.iloc[::-1]
         except: return pd.DataFrame()
 
-# === 🧠 NEW MSNR ENGINE ===
+# === 🧠 MSNR ENGINE (Market Structure + Retest) ===
 def get_smc_signal(df_l, df_h, pair):
     if df_l.empty or df_h.empty: return None
     pip_val = 100 if any(x in pair.upper() for x in ["JPY", "V75", "R_"]) else 10000
     
-    # 1. Daily Bias (The "King")
+    # 1. Daily Bias
     bias = "BULL" if df_h['close'].iloc[-1] > df_h['close'].iloc[-20] else "BEAR"
     
-    # 2. Market Structure (BOS) Detection
-    # We look back 20 candles to find the "Swing Points"
-    # We ignore the most recent 3 candles to ensure the swing is valid/formed
+    # 2. Market Structure (BOS)
     swing_high = df_l['high'].iloc[-23:-3].max()
     swing_low = df_l['low'].iloc[-23:-3].min()
-    
-    # Check if we recently BROKE that structure (in the last 5 candles)
     recent_price_action = df_l['close'].iloc[-5:]
     bullish_bos = recent_price_action.max() > swing_high
     bearish_bos = recent_price_action.min() < swing_low
     
-    # 3. FVG / Retest Logic
-    # We need the current candle to be retesting an FVG
+    # 3. Entry Logic (Retest into FVG)
     c1, c3 = df_l.iloc[-3], df_l.iloc[-1]
     
-    # === BUY SCENARIO ===
-    # Daily is Bullish + We broke a recent High (BOS) + We are dipping into an FVG
     if bias == "BULL" and bullish_bos:
-        # FVG Check: Did the move leave a gap? (Low of candle 3 > High of candle 1)
-        # Note: In a retracement, we want price to dip INTO the gap.
-        # Simplification: We check if current Low is dipping near the breakout point
-        
-        # Valid FVG Pattern for entry
         if c3.low > c1.high: 
-            return {
-                "act": "BUY", 
-                "e": c3.close, 
-                "tp": df_h['high'].max(), 
-                "sl": swing_low, # Safer SL below the Swing Low
-                "be": c3.close + (30/pip_val)
-            }
+            return {"act": "BUY", "e": c3.close, "tp": df_h['high'].max(), "sl": swing_low, "be": c3.close + (30/pip_val)}
 
-    # === SELL SCENARIO ===
     if bias == "BEAR" and bearish_bos:
         if c3.high < c1.low:
-            return {
-                "act": "SELL", 
-                "e": c3.close, 
-                "tp": df_h['low'].min(), 
-                "sl": swing_high, # Safer SL above the Swing High
-                "be": c3.close - (30/pip_val)
-            }
+            return {"act": "SELL", "e": c3.close, "tp": df_h['low'].min(), "sl": swing_high, "be": c3.close - (30/pip_val)}
             
     return None
 
 # =====================
-# TELEGRAM HANDLERS
+# TELEGRAM HANDLERS (ALL RESTORED)
 # =====================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_chat.id)
@@ -178,22 +153,41 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(users, uid)
     state = RUNTIME_STATE.get(uid)
 
+    # 1. Status
     if text == "status": 
         time_diff = int(time.time() - LAST_SCAN_TIME)
         status_text = "🟢 SCANNING" if IS_SCANNING else f"⏳ IDLE ({max(0, user['scan_interval'] - time_diff)}s)"
         await update.message.reply_text(f"🤖 *Status*\nScanner: {status_text}\nPairs: {len(user['pairs'])}\nSession: {user['session']}", parse_mode=ParseMode.MARKDOWN)
+    
+    # 2. Add/Remove/Pairs
     elif text == "add": 
         RUNTIME_STATE[uid] = "add"
-        await update.message.reply_text("Enter Symbol:")
+        await update.message.reply_text("Enter Symbol (e.g. XAUUSD):")
     elif text == "remove": 
         RUNTIME_STATE[uid] = "remove"
         await update.message.reply_text("Symbol to remove:")
     elif text == "pairs": 
         await update.message.reply_text(f"📊 Watchlist: {', '.join(user['pairs']) or 'Empty'}")
+
+    # 3. Settings (RESTORED)
+    elif text == "markets": 
+        await update.message.reply_text("📡 Bybit: Crypto | Deriv: Forex/Synthetics")
+    elif text == "setsession": 
+        RUNTIME_STATE[uid] = "session"
+        await update.message.reply_text("Enter LONDON, NY, or BOTH:")
+    elif text == "setscan": 
+        RUNTIME_STATE[uid] = "scan"
+        await update.message.reply_text("Enter Scan seconds:")
+    elif text == "setcooldown": 
+        RUNTIME_STATE[uid] = "cooldown"
+        await update.message.reply_text("Enter Cooldown minutes:")
+    elif text == "setspread": 
+        RUNTIME_STATE[uid] = "spread"
+        await update.message.reply_text("Enter Max Spread (e.g. 0.0005):")
     elif text == "help": 
-        await update.message.reply_text("SMC Sniper: M15 MSNR (BOS + Retest + FVG)")
+        await update.message.reply_text("SMC Sniper: M15 MSNR (BOS + Retest)")
     
-    # State Processing
+    # 4. State Processing (RESTORED)
     elif state == "add":
         user["pairs"].append(text.upper())
         save_users(users)
@@ -205,6 +199,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_users(users)
         RUNTIME_STATE[uid] = None
         await update.message.reply_text(f"🗑 {clean_text} removed.")
+    elif state == "session":
+        user["session"] = text.upper()
+        save_users(users)
+        RUNTIME_STATE[uid] = None
+        await update.message.reply_text(f"✅ Session: {text.upper()}")
+    elif state == "scan":
+        user["scan_interval"] = int(text)
+        save_users(users)
+        RUNTIME_STATE[uid] = None
+        await update.message.reply_text(f"✅ Scan set.")
+    elif state == "cooldown":
+        user["cooldown"] = int(text)
+        save_users(users)
+        RUNTIME_STATE[uid] = None
+        await update.message.reply_text(f"✅ Cooldown set.")
+    elif state == "spread":
+        user["max_spread"] = float(text)
+        save_users(users)
+        RUNTIME_STATE[uid] = None
+        await update.message.reply_text(f"✅ Spread set.")
 
 # =====================
 # ENGINE & SCANNER
@@ -267,11 +281,16 @@ async def post_init(app: Application):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Sniper Ready", reply_markup=ReplyKeyboardMarkup([["add", "remove", "pairs"], ["status", "help"]], resize_keyboard=True))))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Sniper Ready", reply_markup=ReplyKeyboardMarkup([
+        [KeyboardButton("add"), KeyboardButton("remove"), KeyboardButton("pairs")], 
+        [KeyboardButton("status"), KeyboardButton("setsession"), KeyboardButton("markets")], 
+        [KeyboardButton("setscan"), KeyboardButton("setcooldown"), KeyboardButton("setspread")], 
+        [KeyboardButton("help")]
+    ], resize_keyboard=True))))
+    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.post_init = post_init
     app.run_polling()
 
 if __name__ == "__main__": 
-    main()
     main()
