@@ -20,10 +20,8 @@ DERIV_APP_ID = os.getenv("DERIV_APP_ID")
 BYBIT_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_SECRET = os.getenv("BYBIT_API_SECRET")
 
-# 🔒 SECURITY: REPLACE THIS WITH YOUR TELEGRAM ID
-# Get it by messaging @userinfobot on Telegram
-ADMIN_ID = "YOUR_ADMIN_ID_HERE" 
-
+# Get the ID from Railway/Environment, or default to empty string if missing
+ADMIN_ID = os.getenv("ADMIN_ID", "")
 DATA_FILE = "users.json"
 
 # Initialize Bybit
