@@ -118,7 +118,12 @@ async def fetch_data(pair, interval):
 # === 🧠 MSNR ENGINE (Market Structure + Retest + CLAMPED SL) ===
 def get_smc_signal(df_l, df_h, pair):
     if df_l.empty or df_h.empty: return None
-    pip_val = 100 if any(x in pair.upper() for x in ["JPY", "V75", "R_"]) else 10000
+    # 1. Determine Pip Divisor based on asset class
+clean_pair = pair.upper()
+if any(x in clean_pair for x in ["JPY", "V75", "R_", "BOOM", "CRASH", "STEP", "XAU", "US30", "NAS", "GER", "US500"]):
+    pip_val = 10  # For Gold/Indices/JPY pairs (1 pip = 0.1)
+else:
+    pip_val = 10000 # For Standard Forex (EURUSD, GBPUSD) (1 pip = 0.0001)
     
     # 1. Daily Bias
     bias = "BULL" if df_h['close'].iloc[-1] > df_h['close'].iloc[-20] else "BEAR"
