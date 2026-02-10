@@ -82,7 +82,7 @@ def load_users():
             "cooldown": 60,
             "max_spread": 0.0005,
             "session": "BOTH",
-            "mode": "MARKET" # Default to Market Execution
+            "mode": "MARKET"
         }
         defaults.update(saved_settings)
         users[uid] = defaults
@@ -117,14 +117,17 @@ def get_user(users, chat_id):
     return users[chat_id]
 
 # =====================
-# 📰 NEWS FILTER
+# 📰 NEWS FILTER (FIXED)
 # =====================
 def fetch_forex_news():
     global NEWS_CACHE, LAST_NEWS_FETCH
     if time.time() - LAST_NEWS_FETCH < 3600: return 
     
     try:
-        resp = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.xml")
+        # Added User-Agent to prevent blocking
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        resp = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.xml", headers=headers)
+        
         root = ET.fromstring(resp.content)
         events = []
         for event in root.findall('event'):
@@ -135,13 +138,18 @@ def fetch_forex_news():
             time_str = event.find('time').text
             currency = event.find('country').text
             
+            # FIXED DATE FORMAT: %m-%d-%Y (Month-Day-Year)
             if "am" in time_str or "pm" in time_str:
                 dt_str = f"{date} {time_str}"
-                dt_obj = datetime.strptime(dt_str, "%Y-%m-%d %I:%M%p")
-                events.append({"currency": currency, "time": dt_obj})
+                try:
+                    dt_obj = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p")
+                    events.append({"currency": currency, "time": dt_obj})
+                except ValueError:
+                    continue # Skip bad dates
         
         NEWS_CACHE = events
         LAST_NEWS_FETCH = time.time()
+        print(f"📰 Fetched {len(events)} News Events")
     except Exception as e:
         print(f"News Fetch Error: {e}")
 
@@ -249,18 +257,15 @@ def get_smc_signal(df_l, df_h, pair):
 
     sig = None
 
-    # Calculate BOTH Entry Types (Market & Limit)
     if bias == "BULL" and bullish_bos:
         if c3.low > c1.high: 
             raw_sl = swing_low
             limit_entry = swing_high
             market_entry = c3.close
             
-            # SL Calc for Limit
             if (limit_entry - raw_sl) > max_risk_price: sl_limit = limit_entry - max_risk_price
             else: sl_limit = raw_sl
             
-            # SL Calc for Market
             if (market_entry - raw_sl) > max_risk_price: sl_market = market_entry - max_risk_price
             else: sl_market = raw_sl
 
@@ -277,11 +282,9 @@ def get_smc_signal(df_l, df_h, pair):
             limit_entry = swing_low
             market_entry = c3.close
             
-            # SL Calc for Limit
             if (raw_sl - limit_entry) > max_risk_price: sl_limit = limit_entry + max_risk_price
             else: sl_limit = raw_sl
             
-            # SL Calc for Market
             if (raw_sl - market_entry) > max_risk_price: sl_market = market_entry + max_risk_price
             else: sl_market = raw_sl
 
@@ -303,7 +306,6 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = load_users()
     user = get_user(users, uid)
     
-    # Toggle Logic
     if user.get("mode") == "MARKET":
         user["mode"] = "LIMIT"
     else:
@@ -349,7 +351,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "help": 
         await update.message.reply_text("Commands:\n/mode - Toggle Limit/Market\nadd - Add Pair\nremove - Remove Pair\npairs - View List\nstatus - Check Bot", parse_mode=ParseMode.MARKDOWN)
     
-    # State Processing
     elif state == "add":
         if text.upper() not in user["pairs"]:
             user["pairs"].append(text.upper())
@@ -380,7 +381,6 @@ async def scanner_loop(app):
             LAST_SCAN_TIME = time.time()
             users = load_users()
             
-            # Map pairs to list of User IDs
             pair_map = {}
             for uid, settings in users.items():
                 if not is_in_session(settings["session"]): continue
@@ -403,7 +403,6 @@ async def scanner_loop(app):
                 if sig:
                     current_time = time.time()
                     
-                    # PREPARE BOTH MESSAGES
                     msg_market = (f"🚨 *SMC SIGNAL (MARKET)*\n"
                                   f"Symbol: {pair}\n"
                                   f"Action: *{sig['act']} NOW*\n"
@@ -428,7 +427,6 @@ async def scanner_loop(app):
 
                         if should_send:
                             try:
-                                # SELECT MESSAGE BASED ON USER MODE
                                 if user_conf.get("mode") == "LIMIT":
                                     final_msg = msg_limit
                                     price_log = sig['limit_e']
@@ -456,7 +454,7 @@ def main():
     
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Sniper V3 Ready", reply_markup=ReplyKeyboardMarkup([
         [KeyboardButton("add"), KeyboardButton("remove"), KeyboardButton("pairs")], 
-        [KeyboardButton("/mode"), KeyboardButton("status"), KeyboardButton("setsession")], 
+        [KeyboardButton("status"), KeyboardButton("setsession")],
         [KeyboardButton("help")]
     ], resize_keyboard=True))))
     
