@@ -124,7 +124,6 @@ def fetch_forex_news():
     if time.time() - LAST_NEWS_FETCH < 3600: return 
     
     try:
-        # Added User-Agent to prevent blocking
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         resp = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.xml", headers=headers)
         
@@ -138,14 +137,13 @@ def fetch_forex_news():
             time_str = event.find('time').text
             currency = event.find('country').text
             
-            # FIXED DATE FORMAT: %m-%d-%Y (Month-Day-Year)
             if "am" in time_str or "pm" in time_str:
                 dt_str = f"{date} {time_str}"
                 try:
                     dt_obj = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p")
                     events.append({"currency": currency, "time": dt_obj})
                 except ValueError:
-                    continue # Skip bad dates
+                    continue 
         
         NEWS_CACHE = events
         LAST_NEWS_FETCH = time.time()
@@ -327,143 +325,4 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_chat.id)
-    text = update.message.text.lower().strip()
-    users = load_users() 
-    user = get_user(users, uid)
-    state = RUNTIME_STATE.get(uid)
-
-    if text == "status": 
-        time_diff = int(time.time() - LAST_SCAN_TIME)
-        status_text = "🟢 SCANNING" if IS_SCANNING else f"⏳ IDLE ({max(0, user['scan_interval'] - time_diff)}s)"
-        await update.message.reply_text(f"🤖 *Status*\nYour Mode: *{user.get('mode', 'MARKET')}*\nPairs: {len(user['pairs'])}\nSession: {user['session']}", parse_mode=ParseMode.MARKDOWN)
-    
-    elif text == "add": 
-        RUNTIME_STATE[uid] = "add"
-        await update.message.reply_text("Enter Symbol (e.g. XAUUSD):")
-    elif text == "remove": 
-        RUNTIME_STATE[uid] = "remove"
-        await update.message.reply_text("Symbol to remove:")
-    elif text == "pairs": 
-        await update.message.reply_text(f"📊 Watchlist: {', '.join(user['pairs']) or 'Empty'}")
-    elif text == "setsession": 
-        RUNTIME_STATE[uid] = "session"
-        await update.message.reply_text("Enter LONDON, NY, or BOTH:")
-    elif text == "help": 
-        await update.message.reply_text("Commands:\n/mode - Toggle Limit/Market\nadd - Add Pair\nremove - Remove Pair\npairs - View List\nstatus - Check Bot", parse_mode=ParseMode.MARKDOWN)
-    
-    elif state == "add":
-        if text.upper() not in user["pairs"]:
-            user["pairs"].append(text.upper())
-            save_user_settings(uid, user)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ {text.upper()} added.")
-    elif state == "remove":
-        clean_text = text.upper()
-        if clean_text in user["pairs"]: 
-            user["pairs"].remove(clean_text)
-            save_user_settings(uid, user)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"🗑 {clean_text} removed.")
-    elif state == "session":
-        user["session"] = text.upper()
-        save_user_settings(uid, user)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Session: {text.upper()}")
-
-# =====================
-# ENGINE & SCANNER
-# =====================
-async def scanner_loop(app):
-    global LAST_SCAN_TIME, IS_SCANNING
-    while True:
-        try:
-            IS_SCANNING = True
-            LAST_SCAN_TIME = time.time()
-            users = load_users()
-            
-            pair_map = {}
-            for uid, settings in users.items():
-                if not is_in_session(settings["session"]): continue
-                for pair in settings["pairs"]:
-                    clean_p = pair.upper()
-                    if clean_p not in pair_map: pair_map[clean_p] = []
-                    pair_map[clean_p].append(uid)
-            
-            if pair_map: print(f"🔍 [SCAN] Checking {len(pair_map)} unique pairs...")
-
-            for pair, recipients in pair_map.items():
-                if not is_market_open(pair): continue
-                if is_news_blackout(pair): continue
-                
-                df_l = await fetch_data(pair, "M15") 
-                df_h = await fetch_data(pair, "1D")
-                
-                sig = get_smc_signal(df_l, df_h, pair)
-                
-                if sig:
-                    current_time = time.time()
-                    
-                    msg_market = (f"🚨 *SMC SIGNAL (MARKET)*\n"
-                                  f"Symbol: {pair}\n"
-                                  f"Action: *{sig['act']} NOW*\n"
-                                  f"Entry: `{sig['market_e']:.5f}`\n"
-                                  f"TP: `{sig['tp']:.5f}` | SL: `{sig['market_sl']:.5f}`")
-                    
-                    msg_limit = (f"🎯 *SMC SIGNAL (LIMIT)*\n"
-                                 f"Symbol: {pair}\n"
-                                 f"Action: *{sig['act']} LIMIT*\n"
-                                 f"Entry: `{sig['limit_e']:.5f}`\n"
-                                 f"TP: `{sig['tp']:.5f}` | SL: `{sig['limit_sl']:.5f}`")
-
-                    for uid in recipients:
-                        last_info = SENT_SIGNALS.get(f"{uid}_{pair}")
-                        user_conf = get_user(users, uid)
-                        should_send = False
-                        
-                        if last_info is None: should_send = True
-                        elif isinstance(last_info, dict):
-                            if (current_time - last_info['time']) > (user_conf['cooldown'] * 60): should_send = True
-                        else: should_send = True
-
-                        if should_send:
-                            try:
-                                if user_conf.get("mode") == "LIMIT":
-                                    final_msg = msg_limit
-                                    price_log = sig['limit_e']
-                                else:
-                                    final_msg = msg_market
-                                    price_log = sig['market_e']
-                                    
-                                await app.bot.send_message(uid, final_msg, parse_mode=ParseMode.MARKDOWN)
-                                SENT_SIGNALS[f"{uid}_{pair}"] = {'price': price_log, 'time': current_time}
-                                print(f"  🎯 Sent {pair} ({user_conf.get('mode')}) to {uid}")
-                            except: pass
-                                
-            IS_SCANNING = False
-            await asyncio.sleep(60)
-        except Exception as e:
-            print(f"Loop Error: {e}")
-            await asyncio.sleep(10)
-
-async def post_init(app: Application):
-    init_db()
-    asyncio.get_event_loop().create_task(scanner_loop(app))
-
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Sniper V3 Ready", reply_markup=ReplyKeyboardMarkup([
-        [KeyboardButton("add"), KeyboardButton("remove"), KeyboardButton("pairs")], 
-        [KeyboardButton("status"), KeyboardButton("setsession")],
-        [KeyboardButton("help")]
-    ], resize_keyboard=True))))
-    
-    app.add_handler(CommandHandler("broadcast", broadcast_command))
-    app.add_handler(CommandHandler("mode", mode_command)) 
-    
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.post_init = post_init
-    app.run_polling()
-
-if __name__ == "__main__": 
-    main()
+    text = update.message.text.lower().strip
