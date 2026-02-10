@@ -4,3 +4,5 @@ requests
 pytz
 pybit
 websockets
+psycopg2-binary
+lxml
