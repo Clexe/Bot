@@ -22,13 +22,8 @@ DERIV_TOKEN = os.getenv("DERIV_TOKEN")
 DERIV_APP_ID = os.getenv("DERIV_APP_ID")
 BYBIT_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_SECRET = os.getenv("BYBIT_API_SECRET")
-
-# 🚀 DATABASE CONNECTION
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = os.getenv("ADMIN_ID", "")
-
-# Signal Mode: "MARKET" (Instant) or "LIMIT" (Retest Entry)
-SIGNAL_MODE = os.getenv("SIGNAL_MODE", "MARKET").upper() 
 
 # News Settings
 USE_NEWS_FILTER = True
@@ -52,7 +47,6 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
-    """Create table if it doesn't exist."""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -72,7 +66,6 @@ def init_db():
         print(f"❌ DB Init Error: {e}")
 
 def load_users():
-    """Fetch all active users."""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT user_id, settings FROM users WHERE is_active = TRUE")
@@ -88,14 +81,14 @@ def load_users():
             "scan_interval": 60, 
             "cooldown": 60,
             "max_spread": 0.0005,
-            "session": "BOTH"
+            "session": "BOTH",
+            "mode": "MARKET" # Default to Market Execution
         }
         defaults.update(saved_settings)
         users[uid] = defaults
     return users
 
 def save_user_settings(chat_id, settings):
-    """Save/Update user settings."""
     conn = get_db_connection()
     cur = conn.cursor()
     json_settings = json.dumps(settings)
@@ -116,7 +109,8 @@ def get_user(users, chat_id):
             "scan_interval": 60, 
             "cooldown": 60,
             "max_spread": 0.0005,
-            "session": "BOTH"
+            "session": "BOTH",
+            "mode": "MARKET"
         }
         save_user_settings(chat_id, default_settings)
         return default_settings
@@ -127,7 +121,7 @@ def get_user(users, chat_id):
 # =====================
 def fetch_forex_news():
     global NEWS_CACHE, LAST_NEWS_FETCH
-    if time.time() - LAST_NEWS_FETCH < 3600: return # Cache for 1 hour
+    if time.time() - LAST_NEWS_FETCH < 3600: return 
     
     try:
         resp = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.xml")
@@ -148,15 +142,12 @@ def fetch_forex_news():
         
         NEWS_CACHE = events
         LAST_NEWS_FETCH = time.time()
-        print(f"📰 Fetched {len(events)} High Impact News Events")
     except Exception as e:
         print(f"News Fetch Error: {e}")
 
 def is_news_blackout(pair):
     if not USE_NEWS_FILTER: return False
     fetch_forex_news()
-    
-    # Map pair to currency
     currencies = []
     if "USD" in pair: currencies.append("USD")
     if "EUR" in pair: currencies.append("EUR")
@@ -168,8 +159,7 @@ def is_news_blackout(pair):
     for event in NEWS_CACHE:
         if event['currency'] in currencies:
             diff = (event['time'] - now).total_seconds() / 60
-            if -30 <= diff <= 30: # 30 min blackout
-                return True
+            if -30 <= diff <= 30: return True
     return False
 
 # =====================
@@ -195,7 +185,7 @@ def is_market_open(pair):
     return True
 
 # =====================
-# SMART ROUTER & STRATEGY (M15 + MSNR)
+# SMART ROUTER & STRATEGY
 # =====================
 async def fetch_data(pair, interval):
     raw_pair = pair.replace("/", "").strip()
@@ -211,7 +201,6 @@ async def fetch_data(pair, interval):
         
         uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
         gran = 900 if interval == "M15" else 86400 
-        
         try:
             async with websockets.connect(uri) as ws:
                 await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
@@ -260,103 +249,91 @@ def get_smc_signal(df_l, df_h, pair):
 
     sig = None
 
+    # Calculate BOTH Entry Types (Market & Limit)
     if bias == "BULL" and bullish_bos:
         if c3.low > c1.high: 
-            # 🚀 LIMIT MODE LOGIC
-            if SIGNAL_MODE == "LIMIT":
-                entry = swing_high # Retest of broken resistance
-                type_str = "LIMIT"
-            else:
-                entry = c3.close # Market Execution
-                type_str = "MARKET"
-            
             raw_sl = swing_low
-            # Clamp SL
-            if (entry - raw_sl) > max_risk_price: final_sl = entry - max_risk_price
-            else: final_sl = raw_sl
+            limit_entry = swing_high
+            market_entry = c3.close
             
-            sig = {"act": "BUY", "type": type_str, "e": entry, "tp": df_h['high'].max(), "sl": final_sl}
+            # SL Calc for Limit
+            if (limit_entry - raw_sl) > max_risk_price: sl_limit = limit_entry - max_risk_price
+            else: sl_limit = raw_sl
+            
+            # SL Calc for Market
+            if (market_entry - raw_sl) > max_risk_price: sl_market = market_entry - max_risk_price
+            else: sl_market = raw_sl
+
+            sig = {
+                "act": "BUY", 
+                "limit_e": limit_entry, "market_e": market_entry,
+                "limit_sl": sl_limit, "market_sl": sl_market,
+                "tp": df_h['high'].max()
+            }
 
     if bias == "BEAR" and bearish_bos:
         if c3.high < c1.low:
-            if SIGNAL_MODE == "LIMIT":
-                entry = swing_low # Retest of broken support
-                type_str = "LIMIT"
-            else:
-                entry = c3.close
-                type_str = "MARKET"
-            
             raw_sl = swing_high
-            # Clamp SL
-            if (raw_sl - entry) > max_risk_price: final_sl = entry + max_risk_price
-            else: final_sl = raw_sl
+            limit_entry = swing_low
+            market_entry = c3.close
+            
+            # SL Calc for Limit
+            if (raw_sl - limit_entry) > max_risk_price: sl_limit = limit_entry + max_risk_price
+            else: sl_limit = raw_sl
+            
+            # SL Calc for Market
+            if (raw_sl - market_entry) > max_risk_price: sl_market = market_entry + max_risk_price
+            else: sl_market = raw_sl
 
-            sig = {"act": "SELL", "type": type_str, "e": entry, "tp": df_h['low'].min(), "sl": final_sl}
+            sig = {
+                "act": "SELL", 
+                "limit_e": limit_entry, "market_e": market_entry,
+                "limit_sl": sl_limit, "market_sl": sl_market,
+                "tp": df_h['low'].min()
+            }
             
     return sig
 
 # =====================
-# ADMIN COMMANDS
+# COMMAND HANDLERS
 # =====================
+async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle between MARKET and LIMIT execution for the user."""
+    uid = str(update.effective_chat.id)
+    users = load_users()
+    user = get_user(users, uid)
+    
+    # Toggle Logic
+    if user.get("mode") == "MARKET":
+        user["mode"] = "LIMIT"
+    else:
+        user["mode"] = "MARKET"
+    
+    save_user_settings(uid, user)
+    await update.message.reply_text(f"🔄 **Your Mode Updated:** {user['mode']}\n\nLIMIT = Pending Orders (Retest)\nMARKET = Instant Execution", parse_mode=ParseMode.MARKDOWN)
+
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = str(update.effective_user.id)
-    if sender_id != ADMIN_ID:
-        await update.message.reply_text("⛔ Unauthorized.")
-        return
-
-    if not context.args:
-        await update.message.reply_text("⚠️ Usage: `/broadcast Message`")
-        return
-
+    if sender_id != ADMIN_ID: return
+    if not context.args: return
     message_text = " ".join(context.args)
-    users = load_users() # Loads from DB
-    count = 0
-    blocked_count = 0
-    
-    status_msg = await update.message.reply_text(f"⏳ Sending to {len(users)} users...")
-
+    users = load_users()
     for uid in list(users.keys()):
         try:
-            await context.bot.send_message(
-                chat_id=uid, 
-                text=f"📢 *ANNOUNCEMENT*\n\n{message_text}", 
-                parse_mode=ParseMode.MARKDOWN
-            )
-            count += 1
-            await asyncio.sleep(0.05)
-        except Forbidden:
-            blocked_count += 1
-        except Exception as e:
-            print(f"Failed to send to {uid}: {e}")
+            await context.bot.send_message(chat_id=uid, text=f"📢 *ANNOUNCEMENT*\n\n{message_text}", parse_mode=ParseMode.MARKDOWN)
+        except: pass
 
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id, 
-        message_id=status_msg.message_id, 
-        text=f"✅ Broadcast Complete.\n\nsent: {count}\n🚫 Blocked: {blocked_count}"
-    )
-
-async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sender_id = str(update.effective_user.id)
-    if sender_id != ADMIN_ID: return
-    users = load_users()
-    active_pairs = sum([len(u.get("pairs", [])) for u in users.values()])
-    await update.message.reply_text(f"👥 Users: `{len(users)}` | Pairs: `{active_pairs}`", parse_mode=ParseMode.MARKDOWN)
-
-# =====================
-# TELEGRAM HANDLERS
-# =====================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_chat.id)
     text = update.message.text.lower().strip()
-    
-    users = load_users() # Checks DB
+    users = load_users() 
     user = get_user(users, uid)
     state = RUNTIME_STATE.get(uid)
 
     if text == "status": 
         time_diff = int(time.time() - LAST_SCAN_TIME)
         status_text = "🟢 SCANNING" if IS_SCANNING else f"⏳ IDLE ({max(0, user['scan_interval'] - time_diff)}s)"
-        await update.message.reply_text(f"🤖 *Status*\nScanner: {status_text}\nPairs: {len(user['pairs'])}\nSession: {user['session']}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"🤖 *Status*\nYour Mode: *{user.get('mode', 'MARKET')}*\nPairs: {len(user['pairs'])}\nSession: {user['session']}", parse_mode=ParseMode.MARKDOWN)
     
     elif text == "add": 
         RUNTIME_STATE[uid] = "add"
@@ -366,24 +343,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Symbol to remove:")
     elif text == "pairs": 
         await update.message.reply_text(f"📊 Watchlist: {', '.join(user['pairs']) or 'Empty'}")
-    elif text == "markets": 
-        await update.message.reply_text("📡 Bybit: Crypto | Deriv: Forex/Synthetics")
     elif text == "setsession": 
         RUNTIME_STATE[uid] = "session"
         await update.message.reply_text("Enter LONDON, NY, or BOTH:")
-    elif text == "setscan": 
-        RUNTIME_STATE[uid] = "scan"
-        await update.message.reply_text("Enter Scan seconds:")
-    elif text == "setcooldown": 
-        RUNTIME_STATE[uid] = "cooldown"
-        await update.message.reply_text("Enter Cooldown minutes:")
-    elif text == "setspread": 
-        RUNTIME_STATE[uid] = "spread"
-        await update.message.reply_text("Enter Max Spread:")
     elif text == "help": 
-        await update.message.reply_text("Commands: add, remove, pairs, status, setsession", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("Commands:\n/mode - Toggle Limit/Market\nadd - Add Pair\nremove - Remove Pair\npairs - View List\nstatus - Check Bot", parse_mode=ParseMode.MARKDOWN)
     
-    # State Processing (Saves to DB)
+    # State Processing
     elif state == "add":
         if text.upper() not in user["pairs"]:
             user["pairs"].append(text.upper())
@@ -402,21 +368,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user_settings(uid, user)
         RUNTIME_STATE[uid] = None
         await update.message.reply_text(f"✅ Session: {text.upper()}")
-    elif state == "scan":
-        user["scan_interval"] = int(text)
-        save_user_settings(uid, user)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Scan set.")
-    elif state == "cooldown":
-        user["cooldown"] = int(text)
-        save_user_settings(uid, user)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Cooldown set.")
-    elif state == "spread":
-        user["max_spread"] = float(text)
-        save_user_settings(uid, user)
-        RUNTIME_STATE[uid] = None
-        await update.message.reply_text(f"✅ Spread set.")
 
 # =====================
 # ENGINE & SCANNER
@@ -427,8 +378,9 @@ async def scanner_loop(app):
         try:
             IS_SCANNING = True
             LAST_SCAN_TIME = time.time()
-            users = load_users() # Fetch from DB
+            users = load_users()
             
+            # Map pairs to list of User IDs
             pair_map = {}
             for uid, settings in users.items():
                 if not is_in_session(settings["session"]): continue
@@ -441,9 +393,7 @@ async def scanner_loop(app):
 
             for pair, recipients in pair_map.items():
                 if not is_market_open(pair): continue
-                if is_news_blackout(pair):
-                    print(f"⏸️ News Blackout for {pair}")
-                    continue
+                if is_news_blackout(pair): continue
                 
                 df_l = await fetch_data(pair, "M15") 
                 df_h = await fetch_data(pair, "1D")
@@ -452,26 +402,43 @@ async def scanner_loop(app):
                 
                 if sig:
                     current_time = time.time()
-                    msg = (f"🚨 *SMC SIGNAL ({sig['type']})*\n"
-                           f"Symbol: {pair}\n"
-                           f"Setup: MSNR (BOS + Retest)\n"
-                           f"Action: *{sig['act']}*\n"
-                           f"Entry: `{sig['e']:.5f}`\n"
-                           f"TP: `{sig['tp']:.5f}` | SL: `{sig['sl']:.5f}`")
+                    
+                    # PREPARE BOTH MESSAGES
+                    msg_market = (f"🚨 *SMC SIGNAL (MARKET)*\n"
+                                  f"Symbol: {pair}\n"
+                                  f"Action: *{sig['act']} NOW*\n"
+                                  f"Entry: `{sig['market_e']:.5f}`\n"
+                                  f"TP: `{sig['tp']:.5f}` | SL: `{sig['market_sl']:.5f}`")
+                    
+                    msg_limit = (f"🎯 *SMC SIGNAL (LIMIT)*\n"
+                                 f"Symbol: {pair}\n"
+                                 f"Action: *{sig['act']} LIMIT*\n"
+                                 f"Entry: `{sig['limit_e']:.5f}`\n"
+                                 f"TP: `{sig['tp']:.5f}` | SL: `{sig['limit_sl']:.5f}`")
 
                     for uid in recipients:
                         last_info = SENT_SIGNALS.get(f"{uid}_{pair}")
+                        user_conf = get_user(users, uid)
                         should_send = False
+                        
                         if last_info is None: should_send = True
                         elif isinstance(last_info, dict):
-                            if (current_time - last_info['time']) > (get_user(users, uid)['cooldown'] * 60): should_send = True
+                            if (current_time - last_info['time']) > (user_conf['cooldown'] * 60): should_send = True
                         else: should_send = True
 
                         if should_send:
                             try:
-                                await app.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN)
-                                SENT_SIGNALS[f"{uid}_{pair}"] = {'price': sig['e'], 'time': current_time}
-                                print(f"  🎯 Sent {pair} signal to User {uid}")
+                                # SELECT MESSAGE BASED ON USER MODE
+                                if user_conf.get("mode") == "LIMIT":
+                                    final_msg = msg_limit
+                                    price_log = sig['limit_e']
+                                else:
+                                    final_msg = msg_market
+                                    price_log = sig['market_e']
+                                    
+                                await app.bot.send_message(uid, final_msg, parse_mode=ParseMode.MARKDOWN)
+                                SENT_SIGNALS[f"{uid}_{pair}"] = {'price': price_log, 'time': current_time}
+                                print(f"  🎯 Sent {pair} ({user_conf.get('mode')}) to {uid}")
                             except: pass
                                 
             IS_SCANNING = False
@@ -481,20 +448,20 @@ async def scanner_loop(app):
             await asyncio.sleep(10)
 
 async def post_init(app: Application):
-    init_db() # 🚀 Initialize Table on Startup
+    init_db()
     asyncio.get_event_loop().create_task(scanner_loop(app))
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Sniper V2 Ready", reply_markup=ReplyKeyboardMarkup([
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Sniper V3 Ready", reply_markup=ReplyKeyboardMarkup([
         [KeyboardButton("add"), KeyboardButton("remove"), KeyboardButton("pairs")], 
-        [KeyboardButton("status"), KeyboardButton("setsession"), KeyboardButton("markets")], 
+        [KeyboardButton("/mode"), KeyboardButton("status"), KeyboardButton("setsession")], 
         [KeyboardButton("help")]
     ], resize_keyboard=True))))
     
     app.add_handler(CommandHandler("broadcast", broadcast_command))
-    app.add_handler(CommandHandler("users", users_command))
+    app.add_handler(CommandHandler("mode", mode_command)) 
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.post_init = post_init
