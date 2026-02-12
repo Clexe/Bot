@@ -6,3 +6,5 @@ pybit
 websockets
 psycopg2-binary
 lxml
+pytest
+pytest-asyncio
