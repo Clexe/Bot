@@ -61,8 +61,7 @@ KNOWN_SYMBOLS = {
     "NZDCAD", "NZDCHF", "NZDJPY", "AUDNZD", "AUDJPY",
     # Crypto
     "BTCUSD", "ETHUSD", "SOLUSD", "BTCUSDT", "ETHUSDT", "SOLUSDT",
-    # Indices
-    "US30", "NAS100", "GER40", "UK100", "US500",
+    # Indices (not currently supported on Bybit/Deriv - removed US30, NAS100, GER40, UK100, US500)
     # Volatility Indices
     "V75", "V10", "V25", "V50", "V100",
     "V75_1S", "V10_1S", "V25_1S", "V50_1S", "V100_1S",
@@ -117,14 +116,12 @@ DERIV_SYMBOL_MAP = {
     "V100_1S": "1HZ100V",
     # Commodities
     "XAGUSD": "frxXAGUSD",
-    # Indices
-    "US30": "frxUSOTC",
 }
 
 DERIV_KEYWORDS = [
     "XAU", "XAG", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF",
     "R_", "V75", "V10", "V25", "V50", "V100",
-    "1S", "1HZ", "FRX", "US30", "NAS", "GER", "UK100",
+    "1S", "1HZ", "FRX",
     "BOOM", "CRASH", "STEP", "JUMP",
 ]
 

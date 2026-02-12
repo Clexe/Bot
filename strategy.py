@@ -3,8 +3,19 @@ from config import HIGH_PIP_SYMBOLS
 
 
 def get_pip_value(pair):
-    """Determine pip value multiplier for a given pair."""
+    """Determine pip value multiplier for a given pair.
+
+    Returns a divisor so that risk_pips / pip_value gives a sensible
+    price distance for stop-loss calculations.
+    """
     clean = pair.upper()
+    # Crypto needs special handling per asset price magnitude
+    if "BTC" in clean:
+        return 0.1   # 1 pip ≈ $10, 50 pips ≈ $500
+    if "ETH" in clean:
+        return 1      # 1 pip ≈ $1, 50 pips ≈ $50
+    if "SOL" in clean:
+        return 10     # 1 pip ≈ $0.1, 50 pips ≈ $5
     if any(x in clean for x in HIGH_PIP_SYMBOLS):
         return 10
     return 10000

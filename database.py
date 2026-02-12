@@ -134,6 +134,9 @@ def get_user(users, chat_id):
 def record_signal(pair, direction, mode, entry_price, tp_price, sl_price):
     """Record a new signal to the history table."""
     try:
+        entry_price = float(entry_price)
+        tp_price = float(tp_price)
+        sl_price = float(sl_price)
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -304,6 +307,7 @@ def load_sent_signals():
 def persist_sent_signal(signal_key, price, direction):
     """Persist a sent signal state to survive restarts."""
     try:
+        price = float(price)
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
