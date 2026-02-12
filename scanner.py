@@ -2,7 +2,7 @@ import asyncio
 import time
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, BadRequest
-from config import SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, logger
+from config import SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS, logger
 from database import (
     load_users, get_user, deactivate_user, load_sent_signals,
     persist_sent_signal, cleanup_old_sent_signals,
@@ -102,7 +102,9 @@ async def scanner_loop(app):
                 if not is_in_session(settings["session"]):
                     continue
                 for pair in settings["pairs"]:
-                    clean_p = pair.upper()
+                    clean_p = pair.replace("\n", "").replace("\r", "").strip().upper()
+                    if not clean_p or clean_p not in KNOWN_SYMBOLS:
+                        continue
                     if clean_p not in pair_map:
                         pair_map[clean_p] = []
                     pair_map[clean_p].append(uid)
