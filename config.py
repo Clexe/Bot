@@ -11,6 +11,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("SniperV3")
 
+# Suppress verbose httpx request logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # =====================
 # ENV & CREDENTIALS
 # =====================
