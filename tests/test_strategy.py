@@ -63,9 +63,14 @@ class TestGetPipValue:
     def test_boom_crash(self):
         assert get_pip_value("BOOM300") == 10
 
-    def test_crypto(self):
-        # BTC doesn't match HIGH_PIP_SYMBOLS
-        assert get_pip_value("BTCUSD") == 10000
+    def test_crypto_btc(self):
+        assert get_pip_value("BTCUSD") == 0.1
+
+    def test_crypto_eth(self):
+        assert get_pip_value("ETHUSDT") == 1
+
+    def test_crypto_sol(self):
+        assert get_pip_value("SOLUSDT") == 10
 
     def test_case_insensitive(self):
         assert get_pip_value("xauusd") == 10
