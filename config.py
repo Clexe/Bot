@@ -55,7 +55,7 @@ VALID_HIGHER_TFS = {"H4", "1D", "1W"}
 # =====================
 KNOWN_SYMBOLS = {
     # Forex
-    "XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF",
+    "XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF",
     "EURGBP", "EURJPY", "GBPJPY", "AUDCAD", "AUDCHF", "CADJPY", "CHFJPY",
     "EURAUD", "EURCAD", "EURCHF", "EURNZD", "GBPAUD", "GBPCAD", "GBPCHF", "GBPNZD",
     "NZDCAD", "NZDCHF", "NZDJPY", "AUDNZD", "AUDJPY",
@@ -104,11 +104,25 @@ DERIV_SYMBOL_MAP = {
     "NZDJPY": "frxNZDJPY",
     "AUDNZD": "frxAUDNZD",
     "AUDJPY": "frxAUDJPY",
-    "US30": "OTC_US30",
+    # Volatility Indices
+    "V75": "R_75",
+    "V10": "R_10",
+    "V25": "R_25",
+    "V50": "R_50",
+    "V100": "R_100",
+    "V75_1S": "1HZ75V",
+    "V10_1S": "1HZ10V",
+    "V25_1S": "1HZ25V",
+    "V50_1S": "1HZ50V",
+    "V100_1S": "1HZ100V",
+    # Commodities
+    "XAGUSD": "frxXAGUSD",
+    # Indices
+    "US30": "frxUSOTC",
 }
 
 DERIV_KEYWORDS = [
-    "XAU", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF",
+    "XAU", "XAG", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF",
     "R_", "V75", "V10", "V25", "V50", "V100",
     "1S", "1HZ", "FRX", "US30", "NAS", "GER", "UK100",
     "BOOM", "CRASH", "STEP", "JUMP",
@@ -124,7 +138,7 @@ ALWAYS_OPEN_KEYS = [
 HIGH_PIP_SYMBOLS = [
     "JPY", "V75", "V10", "V25", "V50", "V100",
     "R_", "BOOM", "CRASH", "STEP", "JUMP", "1HZ",
-    "XAU", "US30", "NAS", "GER", "US500", "UK100",
+    "XAU", "XAG", "US30", "NAS", "GER", "US500", "UK100",
 ]
 
 # =====================

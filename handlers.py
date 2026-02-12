@@ -291,19 +291,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif state == "add":
-        symbol = text.upper()
         RUNTIME_STATE[uid] = None
-        if symbol in user["pairs"]:
-            await update.message.reply_text(f"{symbol} is already in your watchlist.")
-        elif symbol not in KNOWN_SYMBOLS:
-            await update.message.reply_text(
-                f"Unknown symbol: {symbol}\n"
-                f"Use standard symbols like XAUUSD, BTCUSD, V75, etc."
-            )
-        else:
-            user["pairs"].append(symbol)
+        # Support multiple symbols separated by newlines, commas, or spaces
+        raw_symbols = text.replace(",", " ").replace("\n", " ").split()
+        added = []
+        skipped = []
+        for raw in raw_symbols:
+            symbol = raw.strip().upper()
+            if not symbol:
+                continue
+            if symbol in user["pairs"]:
+                skipped.append(f"{symbol} (already added)")
+            elif symbol not in KNOWN_SYMBOLS:
+                skipped.append(f"{symbol} (unknown)")
+            else:
+                user["pairs"].append(symbol)
+                added.append(symbol)
+        if added:
             save_user_settings(uid, user)
-            await update.message.reply_text(f"{symbol} added to watchlist.")
+        parts = []
+        if added:
+            parts.append(f"Added: {', '.join(added)}")
+        if skipped:
+            parts.append(f"Skipped: {', '.join(skipped)}")
+        if parts:
+            await update.message.reply_text("\n".join(parts))
+        else:
+            await update.message.reply_text("No valid symbols provided. Use standard symbols like XAUUSD, BTCUSD, V75, etc.")
 
     elif state == "remove":
         symbol = text.upper()
