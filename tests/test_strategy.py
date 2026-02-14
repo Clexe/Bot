@@ -10,6 +10,7 @@ from strategy import (
     detect_bos, detect_fvg, calculate_levels, get_smc_signal,
     find_zones, mark_freshness, get_fresh_zones,
     detect_storyline, detect_engulfing, detect_inducement_swept,
+    _opposing_zone_tp, _check_roadblock,
 )
 
 
@@ -99,7 +100,6 @@ class TestDetectBias:
         assert detect_bias(df, lookback=10) == "BULL"
 
     def test_flat_market_bearish(self):
-        # Same close = not strictly greater, so BEAR
         data = [(1.0, 1.1, 0.9, 1.0)] * 25
         df = make_ohlc(data)
         assert detect_bias(df) == "BEAR"
@@ -139,32 +139,52 @@ class TestFindSwingPoints:
 # =====================
 class TestDetectBOS:
     def test_bullish_bos(self):
-        # Swing high at 1.05, recent closes above it
         data = [(1.0, 1.05, 0.95, 1.0)] * 20
-        data += [(1.0, 1.08, 0.98, 1.06)] * 5  # breaks above
+        data += [(1.0, 1.08, 0.98, 1.06)] * 5  # body closes above swing high
         df = make_ohlc(data)
-        bullish, bearish = detect_bos(df, 1.05, 0.95)
+        bullish, bearish, bull_sw, bear_sw = detect_bos(df, 1.05, 0.95)
         assert bool(bullish) is True
+        assert bull_sw is False  # not a sweep, it's a real break
 
     def test_bearish_bos(self):
         data = [(1.0, 1.05, 0.95, 1.0)] * 20
-        data += [(1.0, 1.02, 0.90, 0.93)] * 5  # breaks below
+        data += [(1.0, 1.02, 0.90, 0.93)] * 5  # body closes below swing low
         df = make_ohlc(data)
-        bullish, bearish = detect_bos(df, 1.05, 0.95)
+        bullish, bearish, bull_sw, bear_sw = detect_bos(df, 1.05, 0.95)
         assert bool(bearish) is True
+        assert bear_sw is False
 
     def test_no_bos(self):
         data = [(1.0, 1.04, 0.96, 1.0)] * 25
         df = make_ohlc(data)
-        bullish, bearish = detect_bos(df, 1.05, 0.95)
+        bullish, bearish, bull_sw, bear_sw = detect_bos(df, 1.05, 0.95)
         assert bool(bullish) is False
         assert bool(bearish) is False
 
     def test_insufficient_data(self):
         df = make_ohlc([(1.0, 1.1, 0.9, 1.0)] * 2)
-        bullish, bearish = detect_bos(df, 1.1, 0.9, lookback=5)
+        result = detect_bos(df, 1.1, 0.9, lookback=5)
+        assert result == (False, False, False, False)
+
+    def test_bull_sweep_wick_only(self):
+        """Wick above swing high but body closes below = bull sweep, not BOS."""
+        data = [(1.0, 1.04, 0.96, 1.0)] * 20
+        # Wick to 1.06 (above swing_high=1.05) but close at 1.03 (below)
+        data += [(1.02, 1.06, 1.01, 1.03)] * 5
+        df = make_ohlc(data)
+        bullish, bearish, bull_sw, bear_sw = detect_bos(df, 1.05, 0.95)
         assert bullish is False
+        assert bull_sw is True  # wick-only sweep
+
+    def test_bear_sweep_wick_only(self):
+        """Wick below swing low but body closes above = bear sweep, not BOS."""
+        data = [(1.0, 1.04, 0.96, 1.0)] * 20
+        # Wick to 0.93 (below swing_low=0.95) but close at 0.97 (above)
+        data += [(0.98, 1.02, 0.93, 0.97)] * 5
+        df = make_ohlc(data)
+        bullish, bearish, bull_sw, bear_sw = detect_bos(df, 1.05, 0.95)
         assert bearish is False
+        assert bear_sw is True
 
 
 # =====================
@@ -172,21 +192,19 @@ class TestDetectBOS:
 # =====================
 class TestDetectFVG:
     def test_bullish_fvg(self):
-        # c3.low > c1.high = bullish gap
         data = [
-            (1.0, 1.02, 0.98, 1.01),   # c1
-            (1.01, 1.04, 1.00, 1.03),   # c2
-            (1.03, 1.06, 1.025, 1.05),  # c3: low 1.025 > c1 high 1.02
+            (1.0, 1.02, 0.98, 1.01),
+            (1.01, 1.04, 1.00, 1.03),
+            (1.03, 1.06, 1.025, 1.05),
         ]
         df = make_ohlc(data)
         assert detect_fvg(df) == "BULL_FVG"
 
     def test_bearish_fvg(self):
-        # c3.high < c1.low = bearish gap
         data = [
-            (1.05, 1.06, 1.03, 1.04),   # c1
-            (1.03, 1.04, 1.01, 1.02),   # c2
-            (1.01, 1.025, 0.99, 1.00),  # c3: high 1.025 < c1 low 1.03
+            (1.05, 1.06, 1.03, 1.04),
+            (1.03, 1.04, 1.01, 1.02),
+            (1.01, 1.025, 0.99, 1.00),
         ]
         df = make_ohlc(data)
         assert detect_fvg(df) == "BEAR_FVG"
@@ -195,7 +213,7 @@ class TestDetectFVG:
         data = [
             (1.0, 1.05, 0.95, 1.02),
             (1.02, 1.04, 1.00, 1.03),
-            (1.03, 1.06, 0.99, 1.04),  # overlapping
+            (1.03, 1.06, 0.99, 1.04),
         ]
         df = make_ohlc(data)
         assert detect_fvg(df) is None
@@ -210,13 +228,11 @@ class TestDetectFVG:
 # =====================
 class TestCalculateLevels:
     def test_buy_sl_within_risk(self):
-        # entry=1.1, swing_low=0.99 (risk 0.11 > max 0.005), so SL is capped
         levels = calculate_levels("BUY", 1.1000, 1.1200, 0.9900, 0.0050, 1.1500)
         assert levels["sl"] == pytest.approx(1.1000 - 0.0050)
         assert levels["tp"] == 1.1500
 
     def test_buy_sl_raw_when_small(self):
-        # entry=1.1, swing_low=1.098 (risk 0.002 < max 0.005), raw SL used
         levels = calculate_levels("BUY", 1.1000, 1.1200, 1.0980, 0.0050, 1.1500)
         assert levels["sl"] == pytest.approx(1.0980)
 
@@ -225,7 +241,6 @@ class TestCalculateLevels:
         assert levels["sl"] == pytest.approx(1.1000 - 0.0050)
 
     def test_sell_sl_raw_when_small(self):
-        # entry=1.1, swing_high=1.102 (risk 0.002 < max 0.005), raw SL used
         levels = calculate_levels("SELL", 1.1000, 1.1020, 1.0800, 0.0050, 1.0500)
         assert levels["sl"] == pytest.approx(1.1020)
         assert levels["tp"] == 1.0500
@@ -241,7 +256,6 @@ class TestCalculateLevels:
 class TestFindZones:
     def test_a_level_detected(self):
         """Bullish candle then bearish candle → A-Level (supply)."""
-        # c2.open != c1.close so the zone has nonzero width
         data = [
             (1.00, 1.03, 0.99, 1.025),  # bullish
             (1.02, 1.03, 0.98, 0.99),   # bearish, open=1.02 < close of c1=1.025
@@ -292,9 +306,9 @@ class TestFindZones:
         """Several alternating candles produce multiple zones."""
         data = [
             (1.00, 1.02, 0.99, 1.015),  # bull
-            (1.01, 1.02, 0.98, 0.985),  # bear → A-level (c1.close=1.015 != c2.open=1.01)
-            (0.99, 1.01, 0.97, 1.005),  # bull → V-level (c1.close=0.985 != c2.open=0.99)
-            (1.01, 1.03, 1.00, 1.02),   # bull → OC-gap (bull+bull)
+            (1.01, 1.02, 0.98, 0.985),  # bear → A-level
+            (0.99, 1.01, 0.97, 1.005),  # bull → V-level
+            (1.01, 1.03, 1.00, 1.02),   # bull → OC-gap
         ]
         df = make_ohlc(data)
         zones = find_zones(df, lookback=40)
@@ -309,13 +323,12 @@ class TestFreshness:
         data = [
             (1.00, 1.03, 0.99, 1.025),  # bullish
             (1.02, 1.03, 0.98, 0.99),   # bearish → A-level zone at (1.02, 1.025)
-            # Next candle wick touches the zone
             (0.98, 1.021, 0.97, 0.98),  # high=1.021 enters zone [1.02, 1.025]
         ]
         df = make_ohlc(data)
         zones = find_zones(df, lookback=40)
         zones = mark_freshness(zones, df)
-        a_zones = [z for z in zones if z["type"] == "A"]
+        a_zones = [z for z in zones if z["type"] == "A" and z["bar_index"] == 0]
         assert len(a_zones) == 1
         assert a_zones[0]["fresh"] is False
 
@@ -324,7 +337,6 @@ class TestFreshness:
         data = [
             (1.00, 1.03, 0.99, 1.025),  # bullish
             (1.02, 1.03, 0.98, 0.99),   # bearish → A-level zone at [1.02, 1.025]
-            # Next candles far below, never touch the zone
             (0.95, 0.96, 0.94, 0.955),
             (0.94, 0.95, 0.93, 0.945),
             (0.93, 0.94, 0.92, 0.935),
@@ -333,7 +345,7 @@ class TestFreshness:
         df = make_ohlc(data)
         zones = find_zones(df, lookback=40)
         zones = mark_freshness(zones, df)
-        a_zones = [z for z in zones if z["type"] == "A"]
+        a_zones = [z for z in zones if z["type"] == "A" and z["bar_index"] == 0]
         assert len(a_zones) == 1
         assert a_zones[0]["fresh"] is True
 
@@ -342,7 +354,6 @@ class TestFreshness:
         data = [
             (1.00, 1.03, 0.99, 1.025),  # bullish
             (1.02, 1.03, 0.98, 0.99),   # bearish → A-level zone at [1.02, 1.025]
-            # 3 candles that don't touch zone (all far below)
             (0.95, 0.96, 0.94, 0.955),
             (0.94, 0.95, 0.93, 0.945),
             (0.93, 0.94, 0.92, 0.935),
@@ -350,10 +361,56 @@ class TestFreshness:
         df = make_ohlc(data)
         zones = find_zones(df, lookback=40)
         zones = mark_freshness(zones, df)
-        a_zones = [z for z in zones if z["type"] == "A"]
+        a_zones = [z for z in zones if z["type"] == "A" and z["bar_index"] == 0]
         assert len(a_zones) == 1
         assert a_zones[0]["miss"] is True
         assert a_zones[0]["fresh"] is True
+
+    def test_sbr_demand_broken_becomes_supply(self):
+        """Demand zone broken by bearish body close → flips to fresh supply."""
+        data = [
+            (1.02, 1.03, 0.98, 0.99),   # bearish
+            (1.00, 1.03, 0.98, 1.02),   # bullish → V-level demand at [0.99, 1.00]
+            # Bearish candle whose body closes below the demand zone bottom (0.99)
+            (0.995, 1.00, 0.97, 0.98),  # body_bottom = min(0.995, 0.98) = 0.98 < 0.99
+        ]
+        df = make_ohlc(data)
+        zones = find_zones(df, lookback=40)
+        zones = mark_freshness(zones, df)
+
+        # Original demand zone should be unfresh
+        orig = [z for z in zones if z["bar_index"] == 0 and z["direction"] == "demand"]
+        assert len(orig) == 1
+        assert orig[0]["fresh"] is False
+
+        # New flipped supply zone should exist and be fresh
+        flipped = [z for z in zones if z["direction"] == "supply"
+                   and z["top"] == orig[0]["top"] and z["bottom"] == orig[0]["bottom"]]
+        assert len(flipped) == 1
+        assert flipped[0]["fresh"] is True
+
+    def test_rbs_supply_broken_becomes_demand(self):
+        """Supply zone broken by bullish body close → flips to fresh demand."""
+        data = [
+            (1.00, 1.03, 0.99, 1.025),  # bullish
+            (1.02, 1.03, 0.98, 0.99),   # bearish → A-level supply at [1.02, 1.025]
+            # Bullish candle whose body closes above the supply zone top (1.025)
+            (1.02, 1.04, 1.01, 1.03),   # body_top = max(1.02, 1.03) = 1.03 > 1.025
+        ]
+        df = make_ohlc(data)
+        zones = find_zones(df, lookback=40)
+        zones = mark_freshness(zones, df)
+
+        # Original supply zone should be unfresh
+        orig = [z for z in zones if z["bar_index"] == 0 and z["direction"] == "supply"]
+        assert len(orig) == 1
+        assert orig[0]["fresh"] is False
+
+        # New flipped demand zone should exist
+        flipped = [z for z in zones if z["direction"] == "demand"
+                   and z["top"] == orig[0]["top"] and z["bottom"] == orig[0]["bottom"]]
+        assert len(flipped) == 1
+        assert flipped[0]["fresh"] is True
 
     def test_get_fresh_zones_filters(self):
         """get_fresh_zones returns only fresh zones of the requested direction."""
@@ -361,7 +418,6 @@ class TestFreshness:
             (1.00, 1.03, 0.99, 1.025),  # bull
             (1.02, 1.03, 0.98, 0.99),   # bear → A-level (supply)
             (0.99, 1.01, 0.97, 1.005),  # bull → V-level (demand)
-            # Don't touch either zone afterwards
             (0.80, 0.81, 0.79, 0.805),
             (0.79, 0.80, 0.78, 0.795),
             (0.78, 0.79, 0.77, 0.785),
@@ -382,11 +438,9 @@ class TestFreshness:
 class TestStoryline:
     def test_bullish_rejection_confirmed(self):
         """HTF rejection off demand zone + LTF bullish BOS → confirmed BULL."""
-        # HTF: create a demand zone then a rejection candle
         htf_data = [
             (1.05, 1.06, 1.04, 1.04),   # bearish
-            (1.045, 1.06, 1.03, 1.055),  # bullish → V-level demand at [1.04, 1.045]
-            # Filler candles far from zone
+            (1.045, 1.06, 1.03, 1.055),  # bullish → V-level demand
             (1.06, 1.07, 1.05, 1.065),
             (1.07, 1.08, 1.06, 1.075),
             (1.08, 1.09, 1.07, 1.085),
@@ -395,11 +449,10 @@ class TestStoryline:
             (1.11, 1.12, 1.10, 1.115),
             (1.12, 1.13, 1.11, 1.125),
             # Rejection candle: wick dips into demand, body stays above
-            (1.06, 1.07, 1.039, 1.065),  # low=1.039 enters [1.04, 1.045], body_bottom=1.06 > 1.04
+            (1.06, 1.07, 1.039, 1.065),
         ]
         df_h = make_ohlc(htf_data)
 
-        # LTF: needs bullish BOS (23+ candles with swing points and breakout)
         ltf_base = [(1.04, 1.05, 1.03, 1.045)] * 20
         ltf_base += [
             (1.045, 1.06, 1.04, 1.055),
@@ -413,12 +466,13 @@ class TestStoryline:
         result = detect_storyline(df_h, df_l)
         assert result is not None
         assert result["bias"] == "BULL"
+        assert "tp_target" in result
+        assert "roadblock_near" in result
 
     def test_fallback_to_momentum(self):
         """When no HTF rejection found, falls back to momentum bias."""
-        # HTF: flat candles (same open/close) so no zones form, then trending close
         flat = [(1.0, 1.01, 0.99, 1.0)] * 24
-        flat.append((1.0, 1.05, 0.99, 1.04))  # last candle bullish to set momentum
+        flat.append((1.0, 1.05, 0.99, 1.04))
         df_h = make_ohlc(flat)
         df_l = make_trending_data("up", bars=30, start=1.0, step=0.001)
         result = detect_storyline(df_h, df_l)
@@ -426,11 +480,59 @@ class TestStoryline:
         assert result["bias"] == "BULL"
         assert result["confirmed"] is False
         assert result["htf_zone"] is None
+        assert "tp_target" in result
+        assert result["roadblock_near"] is False
 
     def test_insufficient_data(self):
         df_h = make_ohlc([(1.0, 1.1, 0.9, 1.0)] * 5)
         df_l = make_ohlc([(1.0, 1.1, 0.9, 1.0)] * 10)
         assert detect_storyline(df_h, df_l) is None
+
+    def test_opposing_zone_tp_bull(self):
+        """BULL storyline TP targets nearest fresh supply zone above entry."""
+        zones = [
+            {"direction": "supply", "top": 1.10, "bottom": 1.09, "fresh": True},
+            {"direction": "supply", "top": 1.20, "bottom": 1.19, "fresh": True},
+            {"direction": "demand", "top": 0.95, "bottom": 0.94, "fresh": True},
+        ]
+        tp = _opposing_zone_tp(zones, "BULL", 1.05, fallback=1.30)
+        assert tp == 1.09  # nearest supply bottom above entry
+
+    def test_opposing_zone_tp_bear(self):
+        """BEAR storyline TP targets nearest fresh demand zone below entry."""
+        zones = [
+            {"direction": "demand", "top": 0.95, "bottom": 0.94, "fresh": True},
+            {"direction": "demand", "top": 0.90, "bottom": 0.89, "fresh": True},
+            {"direction": "supply", "top": 1.10, "bottom": 1.09, "fresh": True},
+        ]
+        tp = _opposing_zone_tp(zones, "BEAR", 1.00, fallback=0.80)
+        assert tp == 0.95  # nearest demand top below entry
+
+    def test_opposing_zone_tp_fallback(self):
+        """Falls back to HTF extreme when no opposing zone found."""
+        zones = [
+            {"direction": "demand", "top": 0.95, "bottom": 0.94, "fresh": True},
+        ]
+        tp = _opposing_zone_tp(zones, "BULL", 1.05, fallback=1.30)
+        assert tp == 1.30
+
+    def test_roadblock_near(self):
+        """Supply zone within 30% of entry→TP range flags roadblock."""
+        zones = [
+            # Supply zone at 1.06 bottom, entry=1.05, TP=1.15
+            # dist=0.01, range=0.10, ratio=0.10 → within 30%
+            {"direction": "supply", "top": 1.07, "bottom": 1.06, "fresh": True},
+        ]
+        assert _check_roadblock(zones, "BULL", 1.05, 1.15) is True
+
+    def test_no_roadblock(self):
+        """Supply zone far from entry doesn't flag roadblock."""
+        zones = [
+            # Supply zone at 1.12 bottom, entry=1.05, TP=1.15
+            # dist=0.07, range=0.10, ratio=0.70 → not within 30%
+            {"direction": "supply", "top": 1.13, "bottom": 1.12, "fresh": True},
+        ]
+        assert _check_roadblock(zones, "BULL", 1.05, 1.15) is False
 
 
 # =====================
@@ -444,7 +546,7 @@ class TestEngulfing:
                 "fresh": True, "miss": False}
         data = [
             (1.00, 1.01, 0.99, 0.995),  # small bearish
-            (0.99, 1.02, 0.985, 1.015),  # bullish engulfing: wraps prev, low touches zone
+            (0.99, 1.02, 0.985, 1.015),  # bullish engulfing
         ]
         df = make_ohlc(data)
         result = detect_engulfing(df, zone)
@@ -458,7 +560,7 @@ class TestEngulfing:
                 "fresh": True, "miss": False}
         data = [
             (1.025, 1.03, 1.02, 1.028),  # small bullish
-            (1.03, 1.035, 1.015, 1.02),   # bearish engulfing: wraps prev, high touches zone
+            (1.03, 1.035, 1.015, 1.02),   # bearish engulfing
         ]
         df = make_ohlc(data)
         result = detect_engulfing(df, zone)
@@ -471,7 +573,7 @@ class TestEngulfing:
                 "fresh": True, "miss": False}
         data = [
             (1.00, 1.02, 0.98, 1.01),
-            (1.01, 1.015, 1.005, 1.012),  # small, doesn't engulf
+            (1.01, 1.015, 1.005, 1.012),
         ]
         df = make_ohlc(data)
         assert detect_engulfing(df, zone) is None
@@ -488,19 +590,19 @@ class TestEngulfing:
 # INDUCEMENT TESTS (Gap 3)
 # =====================
 class TestInducement:
-    def test_buy_side_sweep(self):
-        """Wick below swing low before bullish move = inducement swept."""
+    def test_buy_side_sweep_body_closes_back(self):
+        """Wick below swing low + body closes above = inducement swept."""
         data = [(1.0, 1.05, 0.95, 1.02)] * 10
-        # Sweep candle: dips below swing_low=0.95
+        # Sweep: wick to 0.94 (below 0.95) but body closes at 1.01 (above 0.95)
         data += [(1.0, 1.03, 0.94, 1.01)]
         data += [(1.01, 1.05, 0.98, 1.04)] * 4
         df = make_ohlc(data)
         assert detect_inducement_swept(df, 1.05, 0.95, "BUY") is True
 
-    def test_sell_side_sweep(self):
-        """Wick above swing high before bearish move = inducement swept."""
+    def test_sell_side_sweep_body_closes_back(self):
+        """Wick above swing high + body closes below = inducement swept."""
         data = [(1.0, 1.05, 0.95, 0.98)] * 10
-        # Sweep candle: pokes above swing_high=1.05
+        # Sweep: wick to 1.06 (above 1.05) but body closes at 0.99 (below 1.05)
         data += [(1.0, 1.06, 0.96, 0.99)]
         data += [(0.99, 1.04, 0.93, 0.95)] * 4
         df = make_ohlc(data)
@@ -516,6 +618,15 @@ class TestInducement:
     def test_insufficient_data(self):
         df = make_ohlc([(1.0, 1.1, 0.9, 1.0)] * 3)
         assert detect_inducement_swept(df, 1.1, 0.9, "BUY") is False
+
+    def test_wick_and_body_both_below_not_inducement(self):
+        """If body also closes below swing low, it's a real break not a sweep."""
+        data = [(1.0, 1.05, 0.95, 1.02)] * 10
+        # Body closes at 0.93 (below swing_low=0.95) — real break, not a trap
+        data += [(0.96, 0.97, 0.92, 0.93)]
+        data += [(0.93, 0.96, 0.91, 0.95)] * 4
+        df = make_ohlc(data)
+        assert detect_inducement_swept(df, 1.05, 0.95, "BUY") is False
 
 
 # =====================
@@ -537,21 +648,15 @@ class TestGetSMCSignal:
 
     def test_buy_signal_structure(self):
         """Construct data that should produce a BUY signal."""
-        # Higher TF: bullish (close rising)
         df_h = make_trending_data("up", bars=25, start=1.0, step=0.002)
 
-        # Lower TF: need BOS + FVG
         base_data = [(1.0, 1.02, 0.98, 1.01)] * 20
-        # Breakout candles
         base_data += [
             (1.01, 1.035, 1.005, 1.03),
             (1.03, 1.04, 1.025, 1.035),
             (1.035, 1.045, 1.03, 1.04),
-        ]
-        # FVG: c[-3].high = 1.045, so c[-1].low must be > 1.045
-        base_data += [
             (1.04, 1.05, 1.035, 1.045),
-            (1.045, 1.06, 1.046, 1.055),  # low=1.046 > c[-3].high=1.045
+            (1.045, 1.06, 1.046, 1.055),
         ]
 
         df_l = make_ohlc(base_data)
@@ -564,33 +669,29 @@ class TestGetSMCSignal:
             assert "tp" in sig
             assert "limit_sl" in sig
             assert "market_sl" in sig
-            # New fields
             assert "confidence" in sig
-            assert sig["confidence"] in ("high", "medium")
+            assert sig["confidence"] in ("high", "medium", "low")
 
     def test_no_signal_conflicting_bias(self):
         """Bearish HTF with bullish LTF should not signal BUY."""
         df_h = make_trending_data("down", bars=25)
-        # LTF tries to break up but HTF bias is bearish
         data = [(1.0, 1.02, 0.98, 1.01)] * 20
         data += [(1.01, 1.04, 1.005, 1.03)] * 5
         df_l = make_ohlc(data)
         sig = get_smc_signal(df_l, df_h, "EURUSD")
-        # Should not produce a BUY (bias mismatch)
         if sig is not None:
             assert sig["act"] != "BUY"
 
     def test_custom_risk_pips(self):
         """Risk pips parameter should affect SL distance."""
         df_h = make_trending_data("up", bars=25, start=1.0, step=0.005)
-        # Wide range data to force SL capping
         data = [(1.0, 1.10, 0.80, 1.05)] * 20
         data += [
             (1.05, 1.15, 1.04, 1.12),
             (1.12, 1.16, 1.10, 1.14),
             (1.14, 1.18, 1.12, 1.16),
             (1.16, 1.20, 1.15, 1.18),
-            (1.18, 1.22, 1.19, 1.21),  # FVG: low 1.19 > c[-3].high 1.18
+            (1.18, 1.22, 1.19, 1.21),
         ]
         df_l = make_ohlc(data)
 
@@ -617,5 +718,26 @@ class TestGetSMCSignal:
         sig = get_smc_signal(df_l, df_h, "EURUSD")
         if sig is not None:
             assert "confidence" in sig
+            assert sig["confidence"] in ("high", "medium", "low")
             assert "zone_type" in sig
             assert "miss" in sig
+
+    def test_signal_without_fvg_still_possible(self):
+        """FVG is now a confluence bonus, not a hard gate — signals can fire without it."""
+        # This tests that the code path doesn't require FVG
+        # We just verify the function doesn't crash when FVG is None
+        df_h = make_trending_data("up", bars=25, start=1.0, step=0.002)
+        # LTF with BOS but no FVG gap
+        base_data = [(1.0, 1.02, 0.98, 1.01)] * 20
+        base_data += [
+            (1.01, 1.03, 1.005, 1.025),
+            (1.025, 1.04, 1.02, 1.035),
+            (1.035, 1.05, 1.03, 1.045),
+            (1.045, 1.06, 1.03, 1.055),  # no gap: low 1.03 < c[-3].high 1.04
+            (1.055, 1.07, 1.04, 1.065),  # overlapping
+        ]
+        df_l = make_ohlc(base_data)
+        # Should not crash — may return None or a signal depending on BOS
+        sig = get_smc_signal(df_l, df_h, "EURUSD")
+        if sig is not None:
+            assert sig["act"] in ("BUY", "SELL")

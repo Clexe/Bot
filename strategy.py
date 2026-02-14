@@ -93,7 +93,12 @@ def mark_freshness(zones, df):
     has a wick that enters the zone.  A zone is marked miss=True if the
     first 3 candles after formation all have wicks that do NOT touch the
     zone (strong displacement).
+
+    SBR/RBS: If a candle body closes *through* a zone (not just wick), the
+    zone is broken and becomes fresh in the opposite direction.
     """
+    new_zones = []
+
     for z in zones:
         formation = z["bar_index"] + 1  # zone forms across bar_index and bar_index+1
         start_check = formation + 1
@@ -104,6 +109,29 @@ def mark_freshness(zones, df):
             candle = df.iloc[j]
             wick_touches = candle['low'] <= z["top"] and candle['high'] >= z["bottom"]
 
+            # SBR/RBS: body closes through the zone → broken, flip direction
+            body_bottom = min(candle['open'], candle['close'])
+            body_top = max(candle['open'], candle['close'])
+
+            if z["direction"] == "demand" and body_bottom < z["bottom"]:
+                # Bearish body closed below demand zone → broken → becomes supply
+                z["fresh"] = False
+                new_zones.append({
+                    "type": z["type"], "direction": "supply",
+                    "top": z["top"], "bottom": z["bottom"],
+                    "bar_index": j, "fresh": True, "miss": False,
+                })
+                break
+            if z["direction"] == "supply" and body_top > z["top"]:
+                # Bullish body closed above supply zone → broken → becomes demand
+                z["fresh"] = False
+                new_zones.append({
+                    "type": z["type"], "direction": "demand",
+                    "top": z["top"], "bottom": z["bottom"],
+                    "bar_index": j, "fresh": True, "miss": False,
+                })
+                break
+
             if wick_touches:
                 z["fresh"] = False
                 break
@@ -113,6 +141,24 @@ def mark_freshness(zones, df):
 
         if z["fresh"] and miss_count >= miss_window:
             z["miss"] = True
+
+    # Add SBR/RBS flipped zones and recursively check their freshness
+    if new_zones:
+        zones.extend(new_zones)
+        # Check freshness of newly created zones only
+        for nz in new_zones:
+            start_check = nz["bar_index"] + 1
+            miss_count = 0
+            for j in range(start_check, len(df)):
+                candle = df.iloc[j]
+                wick_touches = candle['low'] <= nz["top"] and candle['high'] >= nz["bottom"]
+                if wick_touches:
+                    nz["fresh"] = False
+                    break
+                if j - start_check < 3:
+                    miss_count += 1
+            if nz["fresh"] and miss_count >= 3:
+                nz["miss"] = True
 
     return zones
 
@@ -143,13 +189,29 @@ def find_swing_points(df_l, start=-23, end=-3):
 
 
 def detect_bos(df_l, swing_high, swing_low, lookback=5):
-    """Detect Break of Structure."""
+    """Detect Break of Structure with wick-vs-body distinction.
+
+    Returns (bullish_bos, bearish_bos, bull_sweep, bear_sweep).
+    - bullish_bos/bearish_bos: True if a candle *body* (close) broke the level.
+    - bull_sweep/bear_sweep: True if only a wick exceeded the level but body
+      closed back inside — indicates a liquidity grab, not a real breakout.
+    """
     if len(df_l) < lookback:
-        return False, False
-    recent = df_l['close'].iloc[-lookback:]
-    bullish = recent.max() > swing_high
-    bearish = recent.min() < swing_low
-    return bullish, bearish
+        return False, False, False, False
+
+    segment = df_l.iloc[-lookback:]
+    closes = segment['close']
+    highs = segment['high']
+    lows = segment['low']
+
+    bullish_bos = bool(closes.max() > swing_high)
+    bearish_bos = bool(closes.min() < swing_low)
+
+    # Wick-only sweep: wick exceeded but no body close beyond
+    bull_sweep = bool(highs.max() > swing_high) and not bullish_bos
+    bear_sweep = bool(lows.min() < swing_low) and not bearish_bos
+
+    return bullish_bos, bearish_bos, bull_sweep, bear_sweep
 
 
 def detect_fvg(df_l):
@@ -217,10 +279,61 @@ def _htf_rejection(df_h, zones, direction, candles_to_check=3):
     return None
 
 
+def _opposing_zone_tp(fresh_zones, bias, entry_price, fallback):
+    """Find TP from the nearest opposing fresh HTF zone.
+
+    BULL → nearest fresh supply zone's bottom above entry.
+    BEAR → nearest fresh demand zone's top below entry.
+    Falls back to HTF max/min if no opposing zone found.
+    """
+    if bias == "BULL":
+        candidates = [z for z in fresh_zones
+                      if z["direction"] == "supply" and z["bottom"] > entry_price]
+        candidates.sort(key=lambda z: z["bottom"])
+        return candidates[0]["bottom"] if candidates else fallback
+    else:
+        candidates = [z for z in fresh_zones
+                      if z["direction"] == "demand" and z["top"] < entry_price]
+        candidates.sort(key=lambda z: -z["top"])
+        return candidates[0]["top"] if candidates else fallback
+
+
+def _check_roadblock(fresh_zones, bias, entry_price, tp_target):
+    """Check if an intermediate fresh zone sits close to entry (within 30% of range).
+
+    Returns True if a roadblock is near, meaning limited room to breathe.
+    """
+    total_range = abs(tp_target - entry_price)
+    if total_range <= 0:
+        return False
+
+    if bias == "BULL":
+        # Look for supply zones between entry and TP
+        blockers = [z for z in fresh_zones
+                    if z["direction"] == "supply"
+                    and z["bottom"] > entry_price
+                    and z["bottom"] < tp_target]
+        for z in blockers:
+            dist = z["bottom"] - entry_price
+            if dist / total_range <= 0.3:
+                return True
+    else:
+        blockers = [z for z in fresh_zones
+                    if z["direction"] == "demand"
+                    and z["top"] < entry_price
+                    and z["top"] > tp_target]
+        for z in blockers:
+            dist = entry_price - z["top"]
+            if dist / total_range <= 0.3:
+                return True
+    return False
+
+
 def detect_storyline(df_h, df_l):
     """Detect HTF rejection + LTF breakout confirmation.
 
-    Returns {bias, htf_zone, confirmed} or None.
+    Returns {bias, htf_zone, tp_target, confirmed, roadblock_near} or None.
+    TP targets the nearest opposing fresh HTF zone (same-TF rule).
     """
     if len(df_h) < 10 or len(df_l) < 23:
         return None
@@ -232,30 +345,50 @@ def detect_storyline(df_h, df_l):
     demand_zones = [z for z in fresh_htf if z["direction"] == "demand"]
     supply_zones = [z for z in fresh_htf if z["direction"] == "supply"]
 
+    current_price = df_l['close'].iloc[-1]
+
     # Check for bullish rejection (off demand)
     bull_zone = _htf_rejection(df_h, demand_zones, "demand")
     if bull_zone:
+        tp = _opposing_zone_tp(fresh_htf, "BULL", current_price, df_h['high'].max())
+        roadblock = _check_roadblock(fresh_htf, "BULL", current_price, tp)
+
         swing_high, swing_low = find_swing_points(df_l)
+        confirmed = False
         if swing_high is not None:
-            bull_bos, _ = detect_bos(df_l, swing_high, swing_low)
-            if bull_bos:
-                return {"bias": "BULL", "htf_zone": bull_zone, "confirmed": True}
-        return {"bias": "BULL", "htf_zone": bull_zone, "confirmed": False}
+            result = detect_bos(df_l, swing_high, swing_low)
+            bull_bos = result[0]
+            confirmed = bool(bull_bos)
+        return {
+            "bias": "BULL", "htf_zone": bull_zone, "tp_target": tp,
+            "confirmed": confirmed, "roadblock_near": roadblock,
+        }
 
     # Check for bearish rejection (off supply)
     bear_zone = _htf_rejection(df_h, supply_zones, "supply")
     if bear_zone:
+        tp = _opposing_zone_tp(fresh_htf, "BEAR", current_price, df_h['low'].min())
+        roadblock = _check_roadblock(fresh_htf, "BEAR", current_price, tp)
+
         swing_high, swing_low = find_swing_points(df_l)
+        confirmed = False
         if swing_high is not None:
-            _, bear_bos = detect_bos(df_l, swing_high, swing_low)
-            if bear_bos:
-                return {"bias": "BEAR", "htf_zone": bear_zone, "confirmed": True}
-        return {"bias": "BEAR", "htf_zone": bear_zone, "confirmed": False}
+            result = detect_bos(df_l, swing_high, swing_low)
+            bear_bos = result[1]
+            confirmed = bool(bear_bos)
+        return {
+            "bias": "BEAR", "htf_zone": bear_zone, "tp_target": tp,
+            "confirmed": confirmed, "roadblock_near": roadblock,
+        }
 
     # Fallback: momentum-based bias (backward compat)
     fallback_bias = detect_bias(df_h)
     if fallback_bias:
-        return {"bias": fallback_bias, "htf_zone": None, "confirmed": False}
+        fallback_tp = df_h['high'].max() if fallback_bias == "BULL" else df_h['low'].min()
+        return {
+            "bias": fallback_bias, "htf_zone": None, "tp_target": fallback_tp,
+            "confirmed": False, "roadblock_near": False,
+        }
 
     return None
 
@@ -302,19 +435,23 @@ def detect_engulfing(df, zone, lookback=10):
 def detect_inducement_swept(df, swing_high, swing_low, direction, lookback=15):
     """Check if liquidity was swept before the current move.
 
-    For BUY:  was there a wick below swing_low (sweeping sell-side liquidity)?
-    For SELL: was there a wick above swing_high (sweeping buy-side liquidity)?
+    For BUY:  a wick dipped below swing_low but the body (close) closed back
+              above it — confirming a trap / stop hunt.
+    For SELL: a wick spiked above swing_high but body closed back below.
     """
     if len(df) < lookback:
         return False
 
     start = max(0, len(df) - lookback)
-    segment = df.iloc[start:]
 
-    if direction == "BUY":
-        return bool(segment['low'].min() < swing_low)
-    if direction == "SELL":
-        return bool(segment['high'].max() > swing_high)
+    for i in range(start, len(df)):
+        c = df.iloc[i]
+        if direction == "BUY":
+            if c['low'] < swing_low and min(c['open'], c['close']) >= swing_low:
+                return True
+        elif direction == "SELL":
+            if c['high'] > swing_high and max(c['open'], c['close']) <= swing_high:
+                return True
     return False
 
 
@@ -322,16 +459,33 @@ def detect_inducement_swept(df, swing_high, swing_low, direction, lookback=15):
 # Signal Generation (updated flow)
 # =====================
 
+def _compute_confidence(storyline, zone, engulfing, inducement, fvg_match):
+    """Compute three-tier confidence: high / medium / low."""
+    if (storyline["confirmed"] and engulfing and zone
+            and (inducement or zone.get("miss"))):
+        return "high"
+    if storyline["confirmed"] and zone and engulfing:
+        return "medium"
+    if storyline.get("roadblock_near"):
+        return "low"
+    if not storyline["confirmed"]:
+        return "low"
+    # Confirmed storyline but missing engulfing/zone — medium if FVG present
+    if fvg_match:
+        return "medium"
+    return "low"
+
+
 def get_smc_signal(df_l, df_h, pair, risk_pips=50):
     """Generate SMC trading signal from price data.
 
-    New flow:
-      1. Storyline (HTF rejection + LTF breakout confirmation)
-      2. BOS
-      3. Fresh Zone
-      4. FVG (confluence filter)
+    Flow:
+      1. Storyline (HTF rejection + LTF breakout confirmation + opposing zone TP)
+      2. BOS (body-based, wick sweeps detected separately)
+      3. Fresh Zone (required for confirmed storylines)
+      4. FVG (confluence bonus — not a hard gate)
       5. Retest check (wick touches zone)
-      6. Engulfing confirmation
+      6. Engulfing confirmation (required when confirmed + zone exists)
       7. Inducement (bonus confidence)
 
     Returns signal dict or None. Dict shape unchanged for scanner.py compat.
@@ -348,29 +502,40 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
         return None
     bias = storyline["bias"]
 
-    # 2. Swing points + BOS
+    # 2. Swing points + BOS (body-based + wick sweep)
     swing_high, swing_low = find_swing_points(df_l)
     if swing_high is None:
         return None
 
-    bullish_bos, bearish_bos = detect_bos(df_l, swing_high, swing_low)
+    bullish_bos, bearish_bos, bull_sweep, bear_sweep = detect_bos(
+        df_l, swing_high, swing_low
+    )
 
-    # 3. FVG (confluence)
+    # Wick-only sweep in the opposite direction strengthens the opposing case
+    # e.g., bull_sweep (wick above swing_high, body below) = bearish trap signal
+    if bias == "BULL" and bull_sweep and not bullish_bos:
+        # Wick grabbed above but body closed below — this is a bearish trap, skip BUY
+        pass
+    if bias == "BEAR" and bear_sweep and not bearish_bos:
+        pass
+
+    # 3. FVG (confluence bonus, not hard gate)
     fvg = detect_fvg(df_l)
 
     c = df_l.iloc[-1]
     sig = None
 
-    if bias == "BULL" and bullish_bos and fvg == "BULL_FVG":
-        # Fresh zone lookup
+    # Use storyline TP target (opposing HTF zone), fall back to HTF extreme
+    storyline_tp = storyline.get("tp_target")
+
+    if bias == "BULL" and bullish_bos:
         fresh = get_fresh_zones(df_l, "demand")
         zone = fresh[0] if fresh else None
 
-        # Determine entry level
         entry_price = zone["top"] if zone else swing_high
-        tp_target = df_h['high'].max()
+        tp_target = storyline_tp if storyline_tp else df_h['high'].max()
 
-        # Retest check: current candle wick touches zone
+        # Retest check
         retest_ok = True
         if zone:
             retest_ok = c['low'] <= zone['top'] and c['high'] >= zone['bottom']
@@ -380,20 +545,19 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
         if zone and retest_ok:
             engulfing = detect_engulfing(df_l, zone)
 
-        # Require engulfing when storyline is confirmed, allow without for fallback
+        # Require engulfing when storyline is confirmed and zone exists
         if storyline["confirmed"] and zone and not engulfing:
             return None
 
         # Inducement check
         inducement = detect_inducement_swept(df_l, swing_high, swing_low, "BUY")
 
-        # Calculate levels using zone boundary or swing
+        fvg_match = fvg == "BULL_FVG"
+        confidence = _compute_confidence(storyline, zone, engulfing, inducement, fvg_match)
+
         sl_anchor = zone["bottom"] if zone else swing_low
         limit_levels = calculate_levels("BUY", entry_price, swing_high, sl_anchor, max_risk_price, tp_target)
         market_levels = calculate_levels("BUY", c['close'], swing_high, sl_anchor, max_risk_price, tp_target)
-
-        # Confidence
-        confidence = "high" if (engulfing and zone and (inducement or zone.get("miss"))) else "medium"
 
         sig = {
             "act": "BUY",
@@ -407,12 +571,12 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
             "miss": zone["miss"] if zone else False,
         }
 
-    if bias == "BEAR" and bearish_bos and fvg == "BEAR_FVG":
+    if bias == "BEAR" and bearish_bos:
         fresh = get_fresh_zones(df_l, "supply")
         zone = fresh[0] if fresh else None
 
         entry_price = zone["bottom"] if zone else swing_low
-        tp_target = df_h['low'].min()
+        tp_target = storyline_tp if storyline_tp else df_h['low'].min()
 
         retest_ok = True
         if zone:
@@ -427,11 +591,12 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
 
         inducement = detect_inducement_swept(df_l, swing_high, swing_low, "SELL")
 
+        fvg_match = fvg == "BEAR_FVG"
+        confidence = _compute_confidence(storyline, zone, engulfing, inducement, fvg_match)
+
         sl_anchor = zone["top"] if zone else swing_high
         limit_levels = calculate_levels("SELL", entry_price, sl_anchor, swing_low, max_risk_price, tp_target)
         market_levels = calculate_levels("SELL", c['close'], sl_anchor, swing_low, max_risk_price, tp_target)
-
-        confidence = "high" if (engulfing and zone and (inducement or zone.get("miss"))) else "medium"
 
         sig = {
             "act": "SELL",
