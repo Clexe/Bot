@@ -90,12 +90,16 @@ def mark_freshness(zones, df):
     """Update freshness on each zone by checking subsequent candle wicks.
 
     A zone becomes unfresh (fresh=False) if any candle after its formation
-    has a wick that enters the zone.  A zone is marked miss=True if the
-    first 3 candles after formation all have wicks that do NOT touch the
-    zone (strong displacement).
+    has a wick that enters the zone OR comes within the mitigation buffer.
+
+    Mitigation buffer: 0.1% of the zone midpoint price. If price approaches
+    within this buffer and reverses, orders are considered absorbed.
+
+    A zone is marked miss=True if the first 3 candles after formation all
+    have wicks that do NOT touch the zone (strong displacement).
 
     SBR/RBS: If a candle body closes *through* a zone (not just wick), the
-    zone is broken and becomes fresh in the opposite direction.
+    zone is broken and becomes fresh in the opposite direction, tagged FLIP.
     """
     new_zones = []
 
@@ -105,9 +109,15 @@ def mark_freshness(zones, df):
         miss_window = 3
         miss_count = 0
 
+        # Mitigation buffer: 0.1% of zone midpoint
+        zone_mid = (z["top"] + z["bottom"]) / 2
+        buffer = zone_mid * 0.001
+
+        buffered_top = z["top"] + buffer
+        buffered_bottom = z["bottom"] - buffer
+
         for j in range(start_check, len(df)):
             candle = df.iloc[j]
-            wick_touches = candle['low'] <= z["top"] and candle['high'] >= z["bottom"]
 
             # SBR/RBS: body closes through the zone → broken, flip direction
             body_bottom = min(candle['open'], candle['close'])
@@ -117,7 +127,7 @@ def mark_freshness(zones, df):
                 # Bearish body closed below demand zone → broken → becomes supply
                 z["fresh"] = False
                 new_zones.append({
-                    "type": z["type"], "direction": "supply",
+                    "type": "FLIP", "direction": "supply",
                     "top": z["top"], "bottom": z["bottom"],
                     "bar_index": j, "fresh": True, "miss": False,
                 })
@@ -126,11 +136,15 @@ def mark_freshness(zones, df):
                 # Bullish body closed above supply zone → broken → becomes demand
                 z["fresh"] = False
                 new_zones.append({
-                    "type": z["type"], "direction": "demand",
+                    "type": "FLIP", "direction": "demand",
                     "top": z["top"], "bottom": z["bottom"],
                     "bar_index": j, "fresh": True, "miss": False,
                 })
                 break
+
+            # Check wick touch WITH mitigation buffer
+            wick_touches = (candle['low'] <= buffered_top
+                           and candle['high'] >= buffered_bottom)
 
             if wick_touches:
                 z["fresh"] = False
@@ -142,16 +156,18 @@ def mark_freshness(zones, df):
         if z["fresh"] and miss_count >= miss_window:
             z["miss"] = True
 
-    # Add SBR/RBS flipped zones and recursively check their freshness
+    # Add SBR/RBS flipped zones and check their freshness
     if new_zones:
         zones.extend(new_zones)
-        # Check freshness of newly created zones only
         for nz in new_zones:
             start_check = nz["bar_index"] + 1
             miss_count = 0
+            zone_mid = (nz["top"] + nz["bottom"]) / 2
+            buf = zone_mid * 0.001
             for j in range(start_check, len(df)):
                 candle = df.iloc[j]
-                wick_touches = candle['low'] <= nz["top"] and candle['high'] >= nz["bottom"]
+                wick_touches = (candle['low'] <= nz["top"] + buf
+                                and candle['high'] >= nz["bottom"] - buf)
                 if wick_touches:
                     nz["fresh"] = False
                     break
@@ -166,14 +182,54 @@ def mark_freshness(zones, df):
 def get_fresh_zones(df, direction, lookback=40):
     """Return fresh zones matching *direction* ('supply' or 'demand').
 
-    Sorted by strength: MISS zones first, then most recent.
+    Sorted by strength: FLIP zones first, then MISS, then most recent.
     """
     zones = find_zones(df, lookback)
     zones = mark_freshness(zones, df)
     filtered = [z for z in zones if z["fresh"] and z["direction"] == direction]
-    # MISS zones first, then by recency (higher bar_index = more recent)
-    filtered.sort(key=lambda z: (-int(z["miss"]), -z["bar_index"]))
+    # FLIP zones highest priority, then MISS, then recency
+    filtered.sort(key=lambda z: (
+        -int(z["type"] == "FLIP"),
+        -int(z["miss"]),
+        -z["bar_index"],
+    ))
     return filtered
+
+
+# =====================
+# Arrival Physics Filter (Gap 1 - Sniper)
+# =====================
+
+def analyze_arrival(df, zone_price, lookback=3):
+    """Check if price arrived at zone with compression (good) or momentum (bad).
+
+    Calculates avg body size over last 50 candles, then checks if any of the
+    last *lookback* candles has a body > 2.5x average (Marubozu). If so,
+    the zone is invalidated — institutional momentum is breaking through.
+
+    Returns:
+        True if arrival is compressed (safe to trade).
+        False if momentum arrival detected (invalidated).
+    """
+    if len(df) < lookback + 1:
+        return True  # insufficient data, don't block
+
+    # Average body size over last 50 (or available) candles
+    body_window = min(50, len(df))
+    bodies = (df['close'].iloc[-body_window:] - df['open'].iloc[-body_window:]).abs()
+    avg_body = bodies.mean()
+
+    if avg_body <= 0:
+        return True  # flat market, no momentum
+
+    # Check last N candles for Marubozu (body > 2.5x average)
+    recent = df.iloc[-lookback:]
+    for _, c in recent.iterrows():
+        body = abs(c['close'] - c['open'])
+        if body > 2.5 * avg_body:
+            return False  # momentum arrival — invalidate
+
+    return True  # compression arrival — safe
 
 
 # =====================
@@ -240,7 +296,7 @@ def calculate_levels(sig_type, entry, swing_high, swing_low, max_risk_price, tp_
 
 
 # =====================
-# Gap 2: Multi-Timeframe Storyline
+# Multi-Timeframe Storyline (Gap 5 - Sniper)
 # =====================
 
 def detect_bias(df_h, lookback=20):
@@ -329,6 +385,34 @@ def _check_roadblock(fresh_zones, bias, entry_price, tp_target):
     return False
 
 
+def check_roadblocks(entry_price, direction, fresh_zones, risk_distance):
+    """Hard 1:2 RR filter — kill the trade if no clear sky to target.
+
+    Scans for the nearest opposing fresh zone (the roadblock).
+    If distance to that roadblock < 2.0 * risk_distance, return False (kill).
+    Returns True if road is clear (RR >= 1:2).
+    """
+    if risk_distance <= 0:
+        return True
+
+    if direction == "BUY":
+        blockers = [z for z in fresh_zones
+                    if z["direction"] == "supply" and z["bottom"] > entry_price]
+        if not blockers:
+            return True  # no opposing zones = clear sky
+        blockers.sort(key=lambda z: z["bottom"])
+        nearest_dist = blockers[0]["bottom"] - entry_price
+    else:
+        blockers = [z for z in fresh_zones
+                    if z["direction"] == "demand" and z["top"] < entry_price]
+        if not blockers:
+            return True
+        blockers.sort(key=lambda z: -z["top"])
+        nearest_dist = entry_price - blockers[0]["top"]
+
+    return nearest_dist >= 2.0 * risk_distance
+
+
 def detect_storyline(df_h, df_l):
     """Detect HTF rejection + LTF breakout confirmation.
 
@@ -394,7 +478,7 @@ def detect_storyline(df_h, df_l):
 
 
 # =====================
-# Gap 3: Retest Confirmation
+# Retest Confirmation (Gap 3 kept + enhanced)
 # =====================
 
 def detect_engulfing(df, zone, lookback=10):
@@ -438,9 +522,14 @@ def detect_inducement_swept(df, swing_high, swing_low, direction, lookback=15):
     For BUY:  a wick dipped below swing_low but the body (close) closed back
               above it — confirming a trap / stop hunt.
     For SELL: a wick spiked above swing_high but body closed back below.
+
+    Returns dict {swept: bool, wick_level: float} so SL can be placed
+    below/above the sweep wick for maximum protection.
     """
+    result = {"swept": False, "wick_level": None}
+
     if len(df) < lookback:
-        return False
+        return result
 
     start = max(0, len(df) - lookback)
 
@@ -448,45 +537,44 @@ def detect_inducement_swept(df, swing_high, swing_low, direction, lookback=15):
         c = df.iloc[i]
         if direction == "BUY":
             if c['low'] < swing_low and min(c['open'], c['close']) >= swing_low:
-                return True
+                result["swept"] = True
+                if result["wick_level"] is None or c['low'] < result["wick_level"]:
+                    result["wick_level"] = c['low']
         elif direction == "SELL":
             if c['high'] > swing_high and max(c['open'], c['close']) <= swing_high:
-                return True
-    return False
+                result["swept"] = True
+                if result["wick_level"] is None or c['high'] > result["wick_level"]:
+                    result["wick_level"] = c['high']
+    return result
 
 
 # =====================
-# Signal Generation (updated flow)
+# Signal Generation — MSNR Sniper Protocol
 # =====================
 
-def _compute_confidence(storyline, zone, engulfing, inducement, fvg_match):
-    """Compute three-tier confidence: high / medium / low."""
-    if (storyline["confirmed"] and engulfing and zone
-            and (inducement or zone.get("miss"))):
+def _compute_confidence(sweep_detected, engulfing, zone, fvg_match):
+    """Compute confidence tier based on trigger quality.
+
+    Gold Tier: Inducement Sweep + Engulfing → HIGH
+    Silver Tier: Engulfing Only → MEDIUM
+    Otherwise: LOW (should typically be filtered out by layers above)
+    """
+    if sweep_detected and engulfing:
         return "high"
-    if storyline["confirmed"] and zone and engulfing:
-        return "medium"
-    if storyline.get("roadblock_near"):
-        return "low"
-    if not storyline["confirmed"]:
-        return "low"
-    # Confirmed storyline but missing engulfing/zone — medium if FVG present
-    if fvg_match:
+    if engulfing:
         return "medium"
     return "low"
 
 
 def get_smc_signal(df_l, df_h, pair, risk_pips=50):
-    """Generate SMC trading signal from price data.
+    """Generate SMC trading signal using the MSNR Sniper Protocol.
 
-    Flow:
-      1. Storyline (HTF rejection + LTF breakout confirmation + opposing zone TP)
-      2. BOS (body-based, wick sweeps detected separately)
-      3. Fresh Zone (required for confirmed storylines)
-      4. FVG (confluence bonus — not a hard gate)
-      5. Retest check (wick touches zone)
-      6. Engulfing confirmation (required when confirmed + zone exists)
-      7. Inducement (bonus confidence)
+    5-Layer Invalidation Filter:
+      Layer 1 (Zone):    Fresh V-Level or FLIP zone? (If No → None)
+      Layer 2 (Trend):   Matches H4 Storyline bias? (If No → None)
+      Layer 3 (Physics): Compression arrival, not momentum? (If No → None)
+      Layer 4 (Space):   RR > 1:2 to nearest roadblock? (If No → None)
+      Layer 5 (Trigger): Gold=Sweep+Engulfing (HIGH) / Silver=Engulfing (MEDIUM)
 
     Returns signal dict or None. Dict shape unchanged for scanner.py compat.
     """
@@ -496,13 +584,13 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
     pip_val = get_pip_value(pair)
     max_risk_price = risk_pips / pip_val
 
-    # 1. Storyline
+    # --- Layer 2: H4 Storyline ---
     storyline = detect_storyline(df_h, df_l)
     if storyline is None:
         return None
     bias = storyline["bias"]
 
-    # 2. Swing points + BOS (body-based + wick sweep)
+    # Swing points + BOS
     swing_high, swing_low = find_swing_points(df_l)
     if swing_high is None:
         return None
@@ -511,55 +599,81 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
         df_l, swing_high, swing_low
     )
 
-    # Wick-only sweep in the opposite direction strengthens the opposing case
-    # e.g., bull_sweep (wick above swing_high, body below) = bearish trap signal
-    if bias == "BULL" and bull_sweep and not bullish_bos:
-        # Wick grabbed above but body closed below — this is a bearish trap, skip BUY
-        pass
-    if bias == "BEAR" and bear_sweep and not bearish_bos:
-        pass
+    # H4 Gatekeeper: FORBID trading against H4 bias
+    # If H4 says BEAR, no BUY signals allowed (and vice versa)
+    if bias == "BULL" and not bullish_bos:
+        return None
+    if bias == "BEAR" and not bearish_bos:
+        return None
 
-    # 3. FVG (confluence bonus, not hard gate)
+    # FVG (confluence bonus, not hard gate)
     fvg = detect_fvg(df_l)
 
     c = df_l.iloc[-1]
-    sig = None
-
-    # Use storyline TP target (opposing HTF zone), fall back to HTF extreme
     storyline_tp = storyline.get("tp_target")
 
-    if bias == "BULL" and bullish_bos:
+    # All fresh LTF zones for roadblock scanning
+    all_fresh_ltf = find_zones(df_l, lookback=40)
+    all_fresh_ltf = mark_freshness(all_fresh_ltf, df_l)
+    all_fresh_ltf = [z for z in all_fresh_ltf if z["fresh"]]
+
+    if bias == "BULL":
+        # --- Layer 1: Fresh Zone ---
         fresh = get_fresh_zones(df_l, "demand")
         zone = fresh[0] if fresh else None
+        if zone is None:
+            return None  # No fresh zone = no trade
 
-        entry_price = zone["top"] if zone else swing_high
+        entry_price = zone["top"]
         tp_target = storyline_tp if storyline_tp else df_h['high'].max()
 
-        # Retest check
-        retest_ok = True
-        if zone:
-            retest_ok = c['low'] <= zone['top'] and c['high'] >= zone['bottom']
+        # --- Layer 3: Arrival Physics ---
+        if not analyze_arrival(df_l, zone["top"]):
+            return None  # Momentum arrival — invalidated
 
-        # Engulfing confirmation
+        # --- Layer 4: Roadblock RR Check ---
+        risk_distance = abs(entry_price - zone["bottom"])
+        if risk_distance <= 0:
+            risk_distance = max_risk_price
+        if not check_roadblocks(entry_price, "BUY", all_fresh_ltf, risk_distance):
+            return None  # RR < 1:2 to nearest roadblock — kill trade
+
+        # Soft roadblock check (for confidence)
+        roadblock_near = _check_roadblock(all_fresh_ltf, "BULL", entry_price, tp_target)
+
+        # Retest check
+        retest_ok = c['low'] <= zone['top'] and c['high'] >= zone['bottom']
+
+        # --- Layer 5: Trigger ---
         engulfing = None
-        if zone and retest_ok:
+        if retest_ok:
             engulfing = detect_engulfing(df_l, zone)
 
-        # Require engulfing when storyline is confirmed and zone exists
-        if storyline["confirmed"] and zone and not engulfing:
+        # Inducement / Sweep check
+        induce = detect_inducement_swept(df_l, swing_high, swing_low, "BUY")
+        sweep_detected = induce["swept"]
+
+        # Must have at least engulfing to take the trade
+        if not engulfing:
             return None
 
-        # Inducement check
-        inducement = detect_inducement_swept(df_l, swing_high, swing_low, "BUY")
-
         fvg_match = fvg == "BULL_FVG"
-        confidence = _compute_confidence(storyline, zone, engulfing, inducement, fvg_match)
+        confidence = _compute_confidence(sweep_detected, engulfing, zone, fvg_match)
 
-        sl_anchor = zone["bottom"] if zone else swing_low
-        limit_levels = calculate_levels("BUY", entry_price, swing_high, sl_anchor, max_risk_price, tp_target)
-        market_levels = calculate_levels("BUY", c['close'], swing_high, sl_anchor, max_risk_price, tp_target)
+        # SL placement: below sweep wick if available, else below zone
+        if sweep_detected and induce["wick_level"] is not None:
+            sl_anchor = induce["wick_level"]
+        else:
+            sl_anchor = zone["bottom"]
 
-        sig = {
+        limit_levels = calculate_levels(
+            "BUY", entry_price, swing_high, sl_anchor, max_risk_price, tp_target
+        )
+        market_levels = calculate_levels(
+            "BUY", c['close'], swing_high, sl_anchor, max_risk_price, tp_target
+        )
+
+        return {
             "act": "BUY",
             "limit_e": entry_price,
             "limit_sl": limit_levels["sl"],
@@ -567,38 +681,63 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
             "market_sl": market_levels["sl"],
             "tp": limit_levels["tp"],
             "confidence": confidence,
-            "zone_type": zone["type"] if zone else None,
-            "miss": zone["miss"] if zone else False,
+            "zone_type": zone["type"],
+            "miss": zone["miss"],
+            "sweep": sweep_detected,
+            "arrival": "compression",
         }
 
-    if bias == "BEAR" and bearish_bos:
+    if bias == "BEAR":
+        # --- Layer 1: Fresh Zone ---
         fresh = get_fresh_zones(df_l, "supply")
         zone = fresh[0] if fresh else None
-
-        entry_price = zone["bottom"] if zone else swing_low
-        tp_target = storyline_tp if storyline_tp else df_h['low'].min()
-
-        retest_ok = True
-        if zone:
-            retest_ok = c['high'] >= zone['bottom'] and c['low'] <= zone['top']
-
-        engulfing = None
-        if zone and retest_ok:
-            engulfing = detect_engulfing(df_l, zone)
-
-        if storyline["confirmed"] and zone and not engulfing:
+        if zone is None:
             return None
 
-        inducement = detect_inducement_swept(df_l, swing_high, swing_low, "SELL")
+        entry_price = zone["bottom"]
+        tp_target = storyline_tp if storyline_tp else df_h['low'].min()
+
+        # --- Layer 3: Arrival Physics ---
+        if not analyze_arrival(df_l, zone["bottom"]):
+            return None
+
+        # --- Layer 4: Roadblock RR Check ---
+        risk_distance = abs(zone["top"] - entry_price)
+        if risk_distance <= 0:
+            risk_distance = max_risk_price
+        if not check_roadblocks(entry_price, "SELL", all_fresh_ltf, risk_distance):
+            return None
+
+        roadblock_near = _check_roadblock(all_fresh_ltf, "BEAR", entry_price, tp_target)
+
+        retest_ok = c['high'] >= zone['bottom'] and c['low'] <= zone['top']
+
+        engulfing = None
+        if retest_ok:
+            engulfing = detect_engulfing(df_l, zone)
+
+        induce = detect_inducement_swept(df_l, swing_high, swing_low, "SELL")
+        sweep_detected = induce["swept"]
+
+        if not engulfing:
+            return None
 
         fvg_match = fvg == "BEAR_FVG"
-        confidence = _compute_confidence(storyline, zone, engulfing, inducement, fvg_match)
+        confidence = _compute_confidence(sweep_detected, engulfing, zone, fvg_match)
 
-        sl_anchor = zone["top"] if zone else swing_high
-        limit_levels = calculate_levels("SELL", entry_price, sl_anchor, swing_low, max_risk_price, tp_target)
-        market_levels = calculate_levels("SELL", c['close'], sl_anchor, swing_low, max_risk_price, tp_target)
+        if sweep_detected and induce["wick_level"] is not None:
+            sl_anchor = induce["wick_level"]
+        else:
+            sl_anchor = zone["top"]
 
-        sig = {
+        limit_levels = calculate_levels(
+            "SELL", entry_price, sl_anchor, swing_low, max_risk_price, tp_target
+        )
+        market_levels = calculate_levels(
+            "SELL", c['close'], sl_anchor, swing_low, max_risk_price, tp_target
+        )
+
+        return {
             "act": "SELL",
             "limit_e": entry_price,
             "limit_sl": limit_levels["sl"],
@@ -606,8 +745,10 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
             "market_sl": market_levels["sl"],
             "tp": limit_levels["tp"],
             "confidence": confidence,
-            "zone_type": zone["type"] if zone else None,
-            "miss": zone["miss"] if zone else False,
+            "zone_type": zone["type"],
+            "miss": zone["miss"],
+            "sweep": sweep_detected,
+            "arrival": "compression",
         }
 
-    return sig
+    return None
