@@ -52,18 +52,21 @@ async def check_signal_outcomes():
 
             outcome = None
             pnl_pips = 0
+            auto_win_pips = 100
 
             if direction == "BUY":
-                if price >= tp:
+                current_pips = (price - entry) * pip_val
+                if price >= tp or current_pips >= auto_win_pips:
                     outcome = "WIN"
-                    pnl_pips = (tp - entry) * pip_val
+                    pnl_pips = current_pips
                 elif price <= sl:
                     outcome = "LOSS"
                     pnl_pips = (sl - entry) * pip_val
             elif direction == "SELL":
-                if price <= tp:
+                current_pips = (entry - price) * pip_val
+                if price <= tp or current_pips >= auto_win_pips:
                     outcome = "WIN"
-                    pnl_pips = (entry - tp) * pip_val
+                    pnl_pips = current_pips
                 elif price >= sl:
                     outcome = "LOSS"
                     pnl_pips = (entry - sl) * pip_val
