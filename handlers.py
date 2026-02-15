@@ -8,7 +8,8 @@ from config import (
 )
 from database import (
     load_users, save_user_settings, deactivate_user, get_user,
-    get_signal_stats, get_recent_signals,
+    get_user_async, save_user_settings_async, load_users_async,
+    get_signal_stats_async, get_recent_signals_async,
 )
 
 # Runtime state for multi-step text input flows
@@ -27,8 +28,7 @@ def _main_keyboard():
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command - initialize user and show menu."""
     uid = str(update.effective_chat.id)
-    users = load_users()
-    get_user(users, uid)
+    await get_user_async(uid)
     await update.message.reply_text(
         "*Sniper V3* - SMC Trading Signals\n\n"
         "Use the menu below to configure your watchlist and preferences.",
@@ -40,11 +40,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle between MARKET and LIMIT execution mode."""
     uid = str(update.effective_chat.id)
-    users = load_users()
-    user = get_user(users, uid)
+    user = await get_user_async(uid)
 
     user["mode"] = "LIMIT" if user.get("mode") == "MARKET" else "MARKET"
-    save_user_settings(uid, user)
+    await save_user_settings_async(uid, user)
     await update.message.reply_text(
         f"*Mode Updated:* {user['mode']}\n\n"
         f"LIMIT = Pending Orders (Retest)\n"
@@ -56,8 +55,7 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def settf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set entry timeframe: /settf M5, /settf M15, /settf M30, /settf H1"""
     uid = str(update.effective_chat.id)
-    users = load_users()
-    user = get_user(users, uid)
+    user = await get_user_async(uid)
 
     if not context.args:
         await update.message.reply_text(
@@ -75,15 +73,14 @@ async def settf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user["timeframe"] = tf
-    save_user_settings(uid, user)
+    await save_user_settings_async(uid, user)
     await update.message.reply_text(f"Entry timeframe set to: *{tf}*", parse_mode=ParseMode.MARKDOWN)
 
 
 async def sethtf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set higher timeframe: /sethtf H4, /sethtf 1D, /sethtf 1W"""
     uid = str(update.effective_chat.id)
-    users = load_users()
-    user = get_user(users, uid)
+    user = await get_user_async(uid)
 
     if not context.args:
         await update.message.reply_text(
@@ -101,15 +98,14 @@ async def sethtf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user["higher_tf"] = tf
-    save_user_settings(uid, user)
+    await save_user_settings_async(uid, user)
     await update.message.reply_text(f"Higher timeframe set to: *{tf}*", parse_mode=ParseMode.MARKDOWN)
 
 
 async def setrisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set max risk in pips: /setrisk 30"""
     uid = str(update.effective_chat.id)
-    users = load_users()
-    user = get_user(users, uid)
+    user = await get_user_async(uid)
 
     if not context.args:
         await update.message.reply_text(
@@ -130,7 +126,7 @@ async def setrisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user["risk_pips"] = pips
-    save_user_settings(uid, user)
+    await save_user_settings_async(uid, user)
     await update.message.reply_text(f"Max risk set to: *{pips} pips*", parse_mode=ParseMode.MARKDOWN)
 
 
@@ -143,7 +139,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /broadcast <message>")
         return
     message_text = " ".join(context.args)
-    users = load_users()
+    users = await load_users_async()
     sent, failed = 0, 0
     for uid in list(users.keys()):
         try:
@@ -167,9 +163,9 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = str(update.effective_user.id)
     if sender_id != ADMIN_ID:
         return
-    users = load_users()
+    users = await load_users_async()
     active_pairs = sum(len(u.get("pairs", [])) for u in users.values())
-    overall_stats = get_signal_stats()
+    overall_stats = await get_signal_stats_async()
     stats_line = ""
     if overall_stats:
         stats_line = (
@@ -187,8 +183,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all text-based menu interactions."""
     uid = str(update.effective_chat.id)
     text = update.message.text.lower().strip()
-    users = load_users()
-    user = get_user(users, uid)
+    user = await get_user_async(uid)
     state = RUNTIME_STATE.get(uid)
 
     if text == "status":
@@ -234,7 +229,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Enter session: LONDON, NY, or BOTH")
 
     elif text == "stats":
-        stats = get_signal_stats()
+        stats = await get_signal_stats_async()
         if not stats or stats['total'] == 0:
             await update.message.reply_text("No signal data yet. Signals will be tracked automatically.")
             return
@@ -252,7 +247,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif text == "history":
-        signals = get_recent_signals(limit=10)
+        signals = await get_recent_signals_async(limit=10)
         if not signals:
             await update.message.reply_text("No signal history yet.")
             return
@@ -308,7 +303,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user["pairs"].append(symbol)
                 added.append(symbol)
         if added:
-            save_user_settings(uid, user)
+            await save_user_settings_async(uid, user)
         parts = []
         if added:
             parts.append(f"Added: {', '.join(added)}")
@@ -324,7 +319,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         RUNTIME_STATE[uid] = None
         if symbol in user["pairs"]:
             user["pairs"].remove(symbol)
-            save_user_settings(uid, user)
+            await save_user_settings_async(uid, user)
             await update.message.reply_text(f"{symbol} removed.")
         else:
             await update.message.reply_text(f"{symbol} not found in your watchlist.")
@@ -336,5 +331,5 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Invalid session. Choose: {', '.join(VALID_SESSIONS)}")
         else:
             user["session"] = session_val
-            save_user_settings(uid, user)
+            await save_user_settings_async(uid, user)
             await update.message.reply_text(f"Session set to: {session_val}")

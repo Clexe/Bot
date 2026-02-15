@@ -3,7 +3,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 from datetime import datetime
 from filters import is_in_session, is_market_open, is_news_blackout
 
@@ -100,35 +100,39 @@ class TestIsMarketOpen:
 
 
 # =====================
-# NEWS BLACKOUT TESTS
+# NEWS BLACKOUT TESTS (now async)
 # =====================
 class TestNewsBlackout:
+    @pytest.mark.asyncio
     @patch('filters.USE_NEWS_FILTER', False)
-    def test_disabled_filter(self):
-        assert is_news_blackout("EURUSD") is False
+    async def test_disabled_filter(self):
+        assert await is_news_blackout("EURUSD") is False
 
-    @patch('filters.fetch_forex_news')
+    @pytest.mark.asyncio
+    @patch('filters.fetch_forex_news', new_callable=AsyncMock)
     @patch('filters._NEWS_CACHE', [])
-    def test_no_news_no_blackout(self, mock_fetch):
-        assert is_news_blackout("EURUSD") is False
+    async def test_no_news_no_blackout(self, mock_fetch):
+        assert await is_news_blackout("EURUSD") is False
 
-    @patch('filters.fetch_forex_news')
-    def test_blackout_during_news(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch('filters.fetch_forex_news', new_callable=AsyncMock)
+    async def test_blackout_during_news(self, mock_fetch):
         import filters
         now = datetime.utcnow()
         filters._NEWS_CACHE = [
             {"currency": "USD", "time": now}
         ]
-        assert is_news_blackout("EURUSD") is True
-        assert is_news_blackout("XAUUSD") is True  # XAU -> USD
+        assert await is_news_blackout("EURUSD") is True
+        assert await is_news_blackout("XAUUSD") is True  # XAU -> USD
         filters._NEWS_CACHE = []
 
-    @patch('filters.fetch_forex_news')
-    def test_no_blackout_unrelated_currency(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch('filters.fetch_forex_news', new_callable=AsyncMock)
+    async def test_no_blackout_unrelated_currency(self, mock_fetch):
         import filters
         now = datetime.utcnow()
         filters._NEWS_CACHE = [
             {"currency": "JPY", "time": now}
         ]
-        assert is_news_blackout("EURUSD") is False
+        assert await is_news_blackout("EURUSD") is False
         filters._NEWS_CACHE = []
