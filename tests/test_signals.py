@@ -58,6 +58,25 @@ class TestFormatSignalMsg:
         msg = format_signal_msg(sig, "EURUSD", "MARKET")
         assert "N/A" in msg
 
+    def test_confidence_shown(self):
+        sig = {**self.sig, "confidence": "high", "sweep": True, "touch": False}
+        msg = format_signal_msg(sig, "EURUSD", "MARKET")
+        assert "[HIGH]" in msg
+        assert "SWEEP" in msg
+
+    def test_touch_trade_tag(self):
+        sig = {**self.sig, "confidence": "medium", "sweep": True, "touch": True}
+        msg = format_signal_msg(sig, "EURUSD", "LIMIT")
+        assert "TOUCH" in msg
+        assert "SWEEP" in msg
+        assert "[MEDIUM]" in msg
+
+    def test_no_extra_tags_when_absent(self):
+        sig = {**self.sig}  # no confidence/sweep/touch keys
+        msg = format_signal_msg(sig, "EURUSD", "MARKET")
+        assert "TOUCH" not in msg
+        assert "SWEEP" not in msg
+
 
 # =====================
 # SHOULD SEND SIGNAL TESTS

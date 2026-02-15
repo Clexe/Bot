@@ -46,6 +46,7 @@ DEFAULT_SETTINGS = {
     "timeframe": "M15",
     "higher_tf": "1D",
     "risk_pips": 50,
+    "touch_trade": False,
 }
 
 VALID_SESSIONS = {"LONDON", "NY", "BOTH"}

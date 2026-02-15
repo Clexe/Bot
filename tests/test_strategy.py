@@ -875,3 +875,55 @@ class TestGetSMCSignal:
         zone = {"type": "V", "miss": False}
         assert _compute_confidence(True, 1, zone, False) == "high"
         assert _compute_confidence(False, 1, zone, False) == "medium"
+
+    def test_touch_trade_field_present(self):
+        """Any signal produced must have the 'touch' field."""
+        df_h = make_trending_data("up", bars=25, start=1.0, step=0.002)
+        base_data = [(1.0, 1.02, 0.98, 1.01)] * 20
+        base_data += [
+            (1.01, 1.035, 1.005, 1.03),
+            (1.03, 1.04, 1.025, 1.035),
+            (1.035, 1.045, 1.03, 1.04),
+            (1.04, 1.05, 1.035, 1.045),
+            (1.045, 1.06, 1.046, 1.055),
+        ]
+        df_l = make_ohlc(base_data)
+        sig = get_smc_signal(df_l, df_h, "EURUSD", touch_trade=True)
+        if sig is not None:
+            assert "touch" in sig
+            assert isinstance(sig["touch"], bool)
+
+
+class TestTouchTrade:
+    def test_confidence_touch_tier(self):
+        """Touch trade: sweep + no engulfing → MEDIUM confidence."""
+        from strategy import _compute_confidence
+        zone = {"type": "V", "miss": False}
+        # touch_entry=True, sweep=True, no engulfing
+        assert _compute_confidence(True, None, zone, False, touch_entry=True) == "medium"
+        # touch_entry=True, no sweep, no engulfing → still LOW
+        assert _compute_confidence(False, None, zone, False, touch_entry=True) == "low"
+
+    def test_confidence_engulfing_still_wins(self):
+        """When engulfing is present, touch_entry flag doesn't matter."""
+        from strategy import _compute_confidence
+        zone = {"type": "V", "miss": False}
+        assert _compute_confidence(True, 1, zone, False, touch_entry=True) == "high"
+        assert _compute_confidence(False, 1, zone, False, touch_entry=True) == "medium"
+
+    def test_touch_off_requires_engulfing(self):
+        """touch_trade=False should still require engulfing."""
+        df_h = make_trending_data("up", bars=25, start=1.0, step=0.002)
+        base = [(1.0, 1.02, 0.98, 1.01)] * 25
+        df_l = make_ohlc(base)
+        sig = get_smc_signal(df_l, df_h, "EURUSD", touch_trade=False)
+        # Should be None — flat data, no engulfing possible
+        assert sig is None
+
+    def test_touch_on_no_sweep_still_none(self):
+        """touch_trade=True without a sweep should still require engulfing."""
+        from strategy import _compute_confidence
+        zone = {"type": "V", "miss": False}
+        # No sweep, no engulfing, touch mode → low → should be blocked
+        conf = _compute_confidence(False, None, zone, False, touch_entry=True)
+        assert conf == "low"

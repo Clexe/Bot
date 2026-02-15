@@ -552,21 +552,24 @@ def detect_inducement_swept(df, swing_high, swing_low, direction, lookback=15):
 # Signal Generation — MSNR Sniper Protocol
 # =====================
 
-def _compute_confidence(sweep_detected, engulfing, zone, fvg_match):
+def _compute_confidence(sweep_detected, engulfing, zone, fvg_match, touch_entry=False):
     """Compute confidence tier based on trigger quality.
 
-    Gold Tier: Inducement Sweep + Engulfing → HIGH
+    Gold Tier:  Inducement Sweep + Engulfing → HIGH
     Silver Tier: Engulfing Only → MEDIUM
-    Otherwise: LOW (should typically be filtered out by layers above)
+    Touch Tier:  Sweep + Zone + Compression (no engulfing) → MEDIUM (touch)
+    Otherwise:   LOW (should typically be filtered out by layers above)
     """
     if sweep_detected and engulfing:
         return "high"
     if engulfing:
         return "medium"
+    if touch_entry and sweep_detected:
+        return "medium"
     return "low"
 
 
-def get_smc_signal(df_l, df_h, pair, risk_pips=50):
+def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
     """Generate SMC trading signal using the MSNR Sniper Protocol.
 
     5-Layer Invalidation Filter:
@@ -575,6 +578,11 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
       Layer 3 (Physics): Compression arrival, not momentum? (If No → None)
       Layer 4 (Space):   RR > 1:2 to nearest roadblock? (If No → None)
       Layer 5 (Trigger): Gold=Sweep+Engulfing (HIGH) / Silver=Engulfing (MEDIUM)
+                         Touch Trade: Sweep+Zone+Compression bypasses engulfing
+
+    Args:
+        touch_trade: If True, allow signals without engulfing when a sweep is
+                     detected alongside a fresh zone and compression arrival.
 
     Returns signal dict or None. Dict shape unchanged for scanner.py compat.
     """
@@ -653,12 +661,18 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
         induce = detect_inducement_swept(df_l, swing_high, swing_low, "BUY")
         sweep_detected = induce["swept"]
 
-        # Must have at least engulfing to take the trade
+        # Layer 5 gate: engulfing required, OR touch trade (sweep bypasses engulfing)
+        is_touch = False
         if not engulfing:
-            return None
+            if touch_trade and sweep_detected:
+                is_touch = True  # Touch trade: sweep + zone + compression = go
+            else:
+                return None
 
         fvg_match = fvg == "BULL_FVG"
-        confidence = _compute_confidence(sweep_detected, engulfing, zone, fvg_match)
+        confidence = _compute_confidence(
+            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch
+        )
 
         # SL placement: below sweep wick if available, else below zone
         if sweep_detected and induce["wick_level"] is not None:
@@ -685,6 +699,7 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
             "miss": zone["miss"],
             "sweep": sweep_detected,
             "arrival": "compression",
+            "touch": is_touch,
         }
 
     if bias == "BEAR":
@@ -719,11 +734,18 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
         induce = detect_inducement_swept(df_l, swing_high, swing_low, "SELL")
         sweep_detected = induce["swept"]
 
+        # Layer 5 gate: engulfing required, OR touch trade (sweep bypasses engulfing)
+        is_touch = False
         if not engulfing:
-            return None
+            if touch_trade and sweep_detected:
+                is_touch = True
+            else:
+                return None
 
         fvg_match = fvg == "BEAR_FVG"
-        confidence = _compute_confidence(sweep_detected, engulfing, zone, fvg_match)
+        confidence = _compute_confidence(
+            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch
+        )
 
         if sweep_detected and induce["wick_level"] is not None:
             sl_anchor = induce["wick_level"]
@@ -749,6 +771,7 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
             "miss": zone["miss"],
             "sweep": sweep_detected,
             "arrival": "compression",
+            "touch": is_touch,
         }
 
     return None

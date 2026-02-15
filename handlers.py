@@ -130,6 +130,22 @@ async def setrisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Max risk set to: *{pips} pips*", parse_mode=ParseMode.MARKDOWN)
 
 
+async def touchmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle touch trade mode: /touchmode"""
+    uid = str(update.effective_chat.id)
+    user = await get_user_async(uid)
+
+    user["touch_trade"] = not user.get("touch_trade", False)
+    await save_user_settings_async(uid, user)
+    status = "ON" if user["touch_trade"] else "OFF"
+    await update.message.reply_text(
+        f"*Touch Trade:* {status}\n\n"
+        f"ON = Limit entries at zone tap when sweep detected (no engulfing needed)\n"
+        f"OFF = Require engulfing confirmation before entry",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: broadcast a message to all users."""
     sender_id = str(update.effective_user.id)
@@ -199,6 +215,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Entry TF: *{user.get('timeframe', 'M15')}*\n"
             f"Higher TF: *{user.get('higher_tf', '1D')}*\n"
             f"Risk: *{user.get('risk_pips', 50)} pips*\n"
+            f"Touch Trade: *{'ON' if user.get('touch_trade') else 'OFF'}*\n"
             f"Pairs: {len(user['pairs'])}\n"
             f"Session: {user['session']}\n"
             f"Scanner: {status_label}",
@@ -273,7 +290,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/mode - Toggle Limit/Market\n"
             "/settf - Set entry timeframe (M5/M15/M30/H1)\n"
             "/sethtf - Set higher timeframe (H4/1D/1W)\n"
-            "/setrisk - Set max risk in pips\n\n"
+            "/setrisk - Set max risk in pips\n"
+            "/touchmode - Toggle touch trade mode\n\n"
             "*Menu:*\n"
             "add - Add pair to watchlist\n"
             "remove - Remove pair\n"

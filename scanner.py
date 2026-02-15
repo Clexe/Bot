@@ -156,19 +156,19 @@ async def scanner_loop(app):
                 recipients = pair_map[pair]
                 current_time = time.time()
 
-                # We need to check signals per-user since they may have different timeframes
-                # Group by timeframe settings
+                # Group by timeframe + touch_trade settings
                 tf_groups = {}
                 for uid in recipients:
                     user_conf = get_user(users, uid)
                     ltf = user_conf.get("timeframe", DEFAULT_SETTINGS["timeframe"])
                     htf = user_conf.get("higher_tf", DEFAULT_SETTINGS["higher_tf"])
-                    key = (ltf, htf)
+                    tt = bool(user_conf.get("touch_trade", False))
+                    key = (ltf, htf, tt)
                     if key not in tf_groups:
                         tf_groups[key] = []
                     tf_groups[key].append((uid, user_conf))
 
-                for (ltf, htf), user_list in tf_groups.items():
+                for (ltf, htf, tt), user_list in tf_groups.items():
                     df_l = all_data.get((pair, ltf), None)
                     df_h = all_data.get((pair, htf), None)
 
@@ -181,7 +181,9 @@ async def scanner_loop(app):
 
                     # Use the first user's risk_pips (they share timeframes)
                     risk_pips = user_list[0][1].get("risk_pips", DEFAULT_SETTINGS["risk_pips"])
-                    sig = get_smc_signal(df_l, df_h, pair, risk_pips=risk_pips)
+                    sig = get_smc_signal(
+                        df_l, df_h, pair, risk_pips=risk_pips, touch_trade=tt
+                    )
 
                     if not sig:
                         continue

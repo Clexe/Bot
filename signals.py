@@ -29,13 +29,23 @@ def format_signal_msg(sig, pair, mode):
     reward = abs(tp - entry)
     rr = f"{reward / risk:.1f}" if risk > 0 else "N/A"
 
+    # Confidence + trigger info
+    confidence = sig.get('confidence', 'medium').upper()
+    trigger_parts = []
+    if sig.get('touch'):
+        trigger_parts.append("TOUCH")
+    if sig.get('sweep'):
+        trigger_parts.append("SWEEP")
+    trigger_tag = " | ".join(trigger_parts) if trigger_parts else ""
+    trigger_line = f"\n{trigger_tag}" if trigger_tag else ""
+
     return (
-        f"{emoji} *SMC SIGNAL ({label})*\n"
+        f"{emoji} *SMC SIGNAL ({label})* [{confidence}]\n"
         f"Symbol: `{pair}`\n"
         f"Action: *{sig['act']} {label}*\n"
         f"Entry: `{entry:.5f}`\n"
         f"TP: `{tp:.5f}` | SL: `{sl:.5f}`\n"
-        f"R:R = *1:{rr}*"
+        f"R:R = *1:{rr}*{trigger_line}"
     )
 
 
