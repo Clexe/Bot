@@ -32,7 +32,7 @@ async def fetch_data(pair, interval):
     if is_deriv_pair(raw_pair):
         return await _fetch_deriv(raw_pair, interval)
     else:
-        return _fetch_bybit(raw_pair, interval)
+        return await asyncio.to_thread(_fetch_bybit, raw_pair, interval)
 
 
 async def fetch_data_parallel(pairs, interval):
@@ -131,7 +131,7 @@ async def fetch_current_price(pair):
     if is_deriv_pair(raw_pair):
         return await _get_deriv_price(raw_pair)
     else:
-        return _get_bybit_price(raw_pair)
+        return await asyncio.to_thread(_get_bybit_price, raw_pair)
 
 
 async def _get_deriv_price(clean_pair):

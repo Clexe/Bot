@@ -1,6 +1,7 @@
 python-telegram-bot==20.8
 pandas
 requests
+aiohttp
 pytz
 pybit
 websockets

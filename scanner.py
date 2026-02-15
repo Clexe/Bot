@@ -115,11 +115,11 @@ async def scanner_loop(app):
             if pair_map:
                 logger.info("Scanning %d unique pairs for %d users", len(pair_map), len(users))
 
-            # Filter pairs by market hours and news
-            active_pairs = [
-                p for p in pair_map
-                if is_market_open(p) and not is_news_blackout(p)
-            ]
+            # Filter pairs by market hours and news (is_news_blackout is now async)
+            active_pairs = []
+            for p in pair_map:
+                if is_market_open(p) and not await is_news_blackout(p):
+                    active_pairs.append(p)
 
             if not active_pairs:
                 IS_SCANNING = False
