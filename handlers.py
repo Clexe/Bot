@@ -130,6 +130,73 @@ async def setrisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Max risk set to: *{pips} pips*", parse_mode=ParseMode.MARKDOWN)
 
 
+async def setbalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set account balance for lot size calculation: /setbalance 10000"""
+    uid = str(update.effective_chat.id)
+    user = await get_user_async(uid)
+
+    if not context.args:
+        bal = user.get("balance", 0)
+        bal_str = f"${bal:,.0f}" if bal else "Not set"
+        await update.message.reply_text(
+            f"Current balance: *{bal_str}*\n"
+            f"Usage: `/setbalance 10000`\n"
+            f"Set to 0 to hide lot size from signals",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    try:
+        balance = float(context.args[0].replace(",", ""))
+    except ValueError:
+        await update.message.reply_text("Please enter a number. Usage: `/setbalance 10000`",
+                                        parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if balance < 0 or balance > 100_000_000:
+        await update.message.reply_text("Balance must be between 0 and 100,000,000.")
+        return
+
+    user["balance"] = balance
+    await save_user_settings_async(uid, user)
+    if balance > 0:
+        await update.message.reply_text(
+            f"Balance set to: *${balance:,.0f}*\nLot sizes will appear in signals.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:
+        await update.message.reply_text("Balance cleared. Lot sizes hidden from signals.")
+
+
+async def setriskpct_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set risk percentage per trade: /setriskpct 2"""
+    uid = str(update.effective_chat.id)
+    user = await get_user_async(uid)
+
+    if not context.args:
+        await update.message.reply_text(
+            f"Current risk: *{user.get('risk_pct', 1)}%* per trade\n"
+            f"Usage: `/setriskpct 2` (range: 0.5-10)",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    try:
+        pct = float(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Please enter a number. Usage: `/setriskpct 2`",
+                                        parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if pct < 0.5 or pct > 10:
+        await update.message.reply_text("Risk must be between 0.5% and 10%.")
+        return
+
+    user["risk_pct"] = pct
+    await save_user_settings_async(uid, user)
+    await update.message.reply_text(f"Risk per trade set to: *{pct}%*", parse_mode=ParseMode.MARKDOWN)
+
+
 async def touchmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle touch trade mode: /touchmode"""
     uid = str(update.effective_chat.id)
@@ -214,7 +281,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Mode: *{user.get('mode', 'MARKET')}*\n"
             f"Entry TF: *{user.get('timeframe', 'M15')}*\n"
             f"Higher TF: *{user.get('higher_tf', '1D')}*\n"
-            f"Risk: *{user.get('risk_pips', 50)} pips*\n"
+            f"Risk: *{user.get('risk_pips', 50)} pips* ({user.get('risk_pct', 1)}%)\n"
+            f"Balance: *{'${:,.0f}'.format(user.get('balance', 0)) if user.get('balance') else 'Not set'}*\n"
             f"Touch Trade: *{'ON' if user.get('touch_trade') else 'OFF'}*\n"
             f"Pairs: {len(user['pairs'])}\n"
             f"Session: {user['session']}\n"
@@ -291,6 +359,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/settf - Set entry timeframe (M5/M15/M30/H1)\n"
             "/sethtf - Set higher timeframe (H4/1D/1W)\n"
             "/setrisk - Set max risk in pips\n"
+            "/setbalance - Set account balance for lot sizing\n"
+            "/setriskpct - Set risk % per trade\n"
             "/touchmode - Toggle touch trade mode\n\n"
             "*Menu:*\n"
             "add - Add pair to watchlist\n"

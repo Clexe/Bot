@@ -47,6 +47,8 @@ DEFAULT_SETTINGS = {
     "higher_tf": "1D",
     "risk_pips": 50,
     "touch_trade": False,
+    "balance": 0,
+    "risk_pct": 1,
 }
 
 VALID_SESSIONS = {"LONDON", "NY", "BOTH"}
@@ -169,8 +171,16 @@ BYBIT_INTERVALS = {
 # SIGNAL & SCANNER SETTINGS
 # =====================
 SIGNAL_TTL = 7200  # 2 hours - cleanup stale signal entries
-SCAN_LOOP_INTERVAL = 60  # seconds between scan cycles
+SCAN_LOOP_INTERVAL = 60  # seconds between scan cycles (default, overridden by adaptive)
 SCAN_ERROR_INTERVAL = 10  # seconds to wait after scanner error
+
+# Adaptive scan interval per timeframe (faster for lower TFs, slower for higher TFs)
+ADAPTIVE_SCAN_INTERVALS = {
+    "M5": 30,
+    "M15": 60,
+    "M30": 90,
+    "H1": 120,
+}
 
 # Rate limiter settings
 RATE_LIMIT_MESSAGES_PER_SECOND = 25  # Telegram allows ~30, leave margin

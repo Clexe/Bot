@@ -19,6 +19,9 @@ class TestFormatSignalMsg:
             "market_e": 1.10200,
             "market_sl": 1.09700,
             "tp": 1.12000,
+            "tp1": 1.10700,
+            "tp2": 1.12000,
+            "tp3": 1.13500,
         }
 
     def test_market_mode_format(self):
@@ -36,9 +39,18 @@ class TestFormatSignalMsg:
 
     def test_rr_calculation(self):
         msg = format_signal_msg(self.sig, "EURUSD", "MARKET")
-        # Entry 1.102, SL 1.097, TP 1.120
+        # Entry 1.102, SL 1.097, TP2 1.120
         # Risk = 0.005, Reward = 0.018, R:R = 3.6
         assert "1:3.6" in msg
+
+    def test_multi_tp_shown(self):
+        msg = format_signal_msg(self.sig, "EURUSD", "MARKET")
+        assert "TP1:" in msg
+        assert "TP2:" in msg
+        assert "TP3:" in msg
+        assert "(1:1)" in msg
+        assert "(Zone)" in msg
+        assert "(Runner)" in msg
 
     def test_sell_signal(self):
         sig = {
@@ -48,6 +60,9 @@ class TestFormatSignalMsg:
             "market_e": 1.09800,
             "market_sl": 1.10300,
             "tp": 1.08000,
+            "tp1": 1.09300,
+            "tp2": 1.08000,
+            "tp3": 1.06500,
         }
         msg = format_signal_msg(sig, "GBPUSD", "MARKET")
         assert "SELL" in msg
@@ -76,6 +91,57 @@ class TestFormatSignalMsg:
         msg = format_signal_msg(sig, "EURUSD", "MARKET")
         assert "TOUCH" not in msg
         assert "SWEEP" not in msg
+
+    def test_lot_size_shown_with_balance(self):
+        msg = format_signal_msg(self.sig, "EURUSD", "MARKET",
+                                balance=10000, risk_pct=1, pip_value=10000)
+        assert "Lot:" in msg
+        assert "$10,000" in msg
+
+    def test_lot_size_hidden_without_balance(self):
+        msg = format_signal_msg(self.sig, "EURUSD", "MARKET", balance=0)
+        assert "Lot:" not in msg
+
+    def test_risk_pips_shown(self):
+        msg = format_signal_msg(self.sig, "EURUSD", "MARKET", pip_value=10000)
+        assert "Risk:" in msg
+        assert "pips" in msg
+
+    def test_backward_compat_no_tp_fields(self):
+        """Old signal dicts without tp1/tp2/tp3 should still work."""
+        sig = {
+            "act": "BUY",
+            "limit_e": 1.10, "limit_sl": 1.09,
+            "market_e": 1.10, "market_sl": 1.09,
+            "tp": 1.12,
+        }
+        msg = format_signal_msg(sig, "EURUSD", "MARKET")
+        assert "TP1:" in msg  # falls back to tp for all 3
+
+
+# =====================
+# LOT SIZE CALCULATION TESTS
+# =====================
+class TestLotSize:
+    def test_standard_forex_lot(self):
+        from signals import _calc_lot_size
+        # $10k balance, 1% risk = $100 risk, 50 pips * $10/pip/lot = $500/lot
+        lot = _calc_lot_size(50, 10000, 10000, 1)
+        assert lot == 0.20  # 100 / 500
+
+    def test_zero_balance_returns_none(self):
+        from signals import _calc_lot_size
+        assert _calc_lot_size(50, 10000, 0, 1) is None
+
+    def test_zero_risk_pips_returns_none(self):
+        from signals import _calc_lot_size
+        assert _calc_lot_size(0, 10000, 10000, 1) is None
+
+    def test_higher_risk_pct_bigger_lot(self):
+        from signals import _calc_lot_size
+        lot_1 = _calc_lot_size(50, 10000, 10000, 1)
+        lot_2 = _calc_lot_size(50, 10000, 10000, 2)
+        assert lot_2 > lot_1
 
 
 # =====================

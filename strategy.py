@@ -283,16 +283,38 @@ def detect_fvg(df_l):
     return None
 
 
-def calculate_levels(sig_type, entry, swing_high, swing_low, max_risk_price, tp_target):
-    """Calculate entry, SL, and TP levels for a signal."""
+def calculate_levels(sig_type, entry, swing_high, swing_low, max_risk_price, tp_target,
+                      htf_extreme=None):
+    """Calculate entry, SL, and multi-TP levels for a signal.
+
+    TP1 = 1:1 RR (safe target, move SL to breakeven after)
+    TP2 = opposing zone target (standard)
+    TP3 = HTF extreme or 1:3 RR (runner)
+    """
     if sig_type == "BUY":
         raw_sl = swing_low
         sl = entry - max_risk_price if (entry - raw_sl) > max_risk_price else raw_sl
+        risk = abs(entry - sl)
+        tp1 = entry + risk          # 1:1
+        tp2 = tp_target             # opposing zone
+        tp3_rr = entry + risk * 3   # 1:3
+        tp3 = max(tp3_rr, htf_extreme) if htf_extreme and htf_extreme > entry else tp3_rr
+        # Ensure TP ordering: TP1 < TP2 < TP3
+        tp2 = max(tp2, tp1)
+        tp3 = max(tp3, tp2)
     else:
         raw_sl = swing_high
         sl = entry + max_risk_price if (raw_sl - entry) > max_risk_price else raw_sl
+        risk = abs(sl - entry)
+        tp1 = entry - risk          # 1:1
+        tp2 = tp_target             # opposing zone
+        tp3_rr = entry - risk * 3   # 1:3
+        tp3 = min(tp3_rr, htf_extreme) if htf_extreme and htf_extreme < entry else tp3_rr
+        # Ensure TP ordering: TP1 > TP2 > TP3
+        tp2 = min(tp2, tp1)
+        tp3 = min(tp3, tp2)
 
-    return {"sl": sl, "tp": tp_target}
+    return {"sl": sl, "tp": tp2, "tp1": tp1, "tp2": tp2, "tp3": tp3}
 
 
 # =====================
@@ -680,11 +702,14 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         else:
             sl_anchor = zone["bottom"]
 
+        htf_extreme = df_h['high'].max()
         limit_levels = calculate_levels(
-            "BUY", entry_price, swing_high, sl_anchor, max_risk_price, tp_target
+            "BUY", entry_price, swing_high, sl_anchor, max_risk_price, tp_target,
+            htf_extreme=htf_extreme,
         )
         market_levels = calculate_levels(
-            "BUY", c['close'], swing_high, sl_anchor, max_risk_price, tp_target
+            "BUY", c['close'], swing_high, sl_anchor, max_risk_price, tp_target,
+            htf_extreme=htf_extreme,
         )
 
         return {
@@ -694,6 +719,9 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             "market_e": c['close'],
             "market_sl": market_levels["sl"],
             "tp": limit_levels["tp"],
+            "tp1": limit_levels["tp1"],
+            "tp2": limit_levels["tp2"],
+            "tp3": limit_levels["tp3"],
             "confidence": confidence,
             "zone_type": zone["type"],
             "miss": zone["miss"],
@@ -752,11 +780,14 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         else:
             sl_anchor = zone["top"]
 
+        htf_extreme = df_h['low'].min()
         limit_levels = calculate_levels(
-            "SELL", entry_price, sl_anchor, swing_low, max_risk_price, tp_target
+            "SELL", entry_price, sl_anchor, swing_low, max_risk_price, tp_target,
+            htf_extreme=htf_extreme,
         )
         market_levels = calculate_levels(
-            "SELL", c['close'], sl_anchor, swing_low, max_risk_price, tp_target
+            "SELL", c['close'], sl_anchor, swing_low, max_risk_price, tp_target,
+            htf_extreme=htf_extreme,
         )
 
         return {
@@ -766,6 +797,9 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             "market_e": c['close'],
             "market_sl": market_levels["sl"],
             "tp": limit_levels["tp"],
+            "tp1": limit_levels["tp1"],
+            "tp2": limit_levels["tp2"],
+            "tp3": limit_levels["tp3"],
             "confidence": confidence,
             "zone_type": zone["type"],
             "miss": zone["miss"],

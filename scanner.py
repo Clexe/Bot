@@ -2,7 +2,10 @@ import asyncio
 import time
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, BadRequest
-from config import SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS, logger
+from config import (
+    SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS,
+    ADAPTIVE_SCAN_INTERVALS, logger,
+)
 from database import (
     load_users, get_user, deactivate_user, load_sent_signals,
     persist_sent_signal, cleanup_old_sent_signals,
@@ -46,7 +49,7 @@ async def check_signal_outcomes():
                 continue
 
             entry = sig['entry_price']
-            tp = sig['tp_price']
+            tp = sig['tp_price']   # TP2 (zone target, primary TP)
             sl = sig['sl_price']
             direction = sig['direction']
 
@@ -54,7 +57,10 @@ async def check_signal_outcomes():
             pnl_pips = 0
             auto_win_pips = 100
 
+            # TP1 = 1:1 RR breakeven level
+            risk_dist = abs(entry - sl)
             if direction == "BUY":
+                tp1 = entry + risk_dist
                 current_pips = (price - entry) * pip_val
                 if price >= tp or current_pips >= auto_win_pips:
                     outcome = "WIN"
@@ -63,6 +69,7 @@ async def check_signal_outcomes():
                     outcome = "LOSS"
                     pnl_pips = (sl - entry) * pip_val
             elif direction == "SELL":
+                tp1 = entry - risk_dist
                 current_pips = (entry - price) * pip_val
                 if price <= tp or current_pips >= auto_win_pips:
                     outcome = "WIN"
@@ -199,7 +206,13 @@ async def scanner_loop(app):
                             continue
 
                         mode = user_conf.get("mode", "MARKET")
-                        msg = format_signal_msg(sig, pair, mode)
+                        balance = user_conf.get("balance", 0)
+                        risk_pct = user_conf.get("risk_pct", 1)
+                        pip_val = get_pip_value(pair)
+                        msg = format_signal_msg(
+                            sig, pair, mode,
+                            balance=balance, risk_pct=risk_pct, pip_value=pip_val,
+                        )
                         entry_price = sig['limit_e'] if mode == "LIMIT" else sig['market_e']
                         sl_price = sig['limit_sl'] if mode == "LIMIT" else sig['market_sl']
 
@@ -232,7 +245,16 @@ async def scanner_loop(app):
                             logger.error("Failed to send signal to %s: %s", uid, e)
 
             IS_SCANNING = False
-            await asyncio.sleep(SCAN_LOOP_INTERVAL)
+
+            # Adaptive scan interval: use the shortest timeframe across active users
+            min_tf = "M15"
+            for uid, settings in users.items():
+                tf = settings.get("timeframe", "M15")
+                tf_secs = ADAPTIVE_SCAN_INTERVALS.get(tf, 60)
+                if tf_secs < ADAPTIVE_SCAN_INTERVALS.get(min_tf, 60):
+                    min_tf = tf
+            scan_sleep = ADAPTIVE_SCAN_INTERVALS.get(min_tf, SCAN_LOOP_INTERVAL)
+            await asyncio.sleep(scan_sleep)
         except Exception as e:
             logger.error("Scanner loop error: %s", e, exc_info=True)
             IS_SCANNING = False
