@@ -283,16 +283,38 @@ def detect_fvg(df_l):
     return None
 
 
-def calculate_levels(sig_type, entry, swing_high, swing_low, max_risk_price, tp_target):
-    """Calculate entry, SL, and TP levels for a signal."""
+def calculate_levels(sig_type, entry, swing_high, swing_low, max_risk_price, tp_target,
+                      htf_extreme=None):
+    """Calculate entry, SL, and multi-TP levels for a signal.
+
+    TP1 = 1:1 RR (safe target, move SL to breakeven after)
+    TP2 = opposing zone target (standard)
+    TP3 = HTF extreme or 1:3 RR (runner)
+    """
     if sig_type == "BUY":
         raw_sl = swing_low
         sl = entry - max_risk_price if (entry - raw_sl) > max_risk_price else raw_sl
+        risk = abs(entry - sl)
+        tp1 = entry + risk          # 1:1
+        tp2 = tp_target             # opposing zone
+        tp3_rr = entry + risk * 3   # 1:3
+        tp3 = max(tp3_rr, htf_extreme) if htf_extreme and htf_extreme > entry else tp3_rr
+        # Ensure TP ordering: TP1 < TP2 < TP3
+        tp2 = max(tp2, tp1)
+        tp3 = max(tp3, tp2)
     else:
         raw_sl = swing_high
         sl = entry + max_risk_price if (raw_sl - entry) > max_risk_price else raw_sl
+        risk = abs(sl - entry)
+        tp1 = entry - risk          # 1:1
+        tp2 = tp_target             # opposing zone
+        tp3_rr = entry - risk * 3   # 1:3
+        tp3 = min(tp3_rr, htf_extreme) if htf_extreme and htf_extreme < entry else tp3_rr
+        # Ensure TP ordering: TP1 > TP2 > TP3
+        tp2 = min(tp2, tp1)
+        tp3 = min(tp3, tp2)
 
-    return {"sl": sl, "tp": tp_target}
+    return {"sl": sl, "tp": tp2, "tp1": tp1, "tp2": tp2, "tp3": tp3}
 
 
 # =====================
@@ -552,21 +574,24 @@ def detect_inducement_swept(df, swing_high, swing_low, direction, lookback=15):
 # Signal Generation — MSNR Sniper Protocol
 # =====================
 
-def _compute_confidence(sweep_detected, engulfing, zone, fvg_match):
+def _compute_confidence(sweep_detected, engulfing, zone, fvg_match, touch_entry=False):
     """Compute confidence tier based on trigger quality.
 
-    Gold Tier: Inducement Sweep + Engulfing → HIGH
+    Gold Tier:  Inducement Sweep + Engulfing → HIGH
     Silver Tier: Engulfing Only → MEDIUM
-    Otherwise: LOW (should typically be filtered out by layers above)
+    Touch Tier:  Sweep + Zone + Compression (no engulfing) → MEDIUM (touch)
+    Otherwise:   LOW (should typically be filtered out by layers above)
     """
     if sweep_detected and engulfing:
         return "high"
     if engulfing:
         return "medium"
+    if touch_entry and sweep_detected:
+        return "medium"
     return "low"
 
 
-def get_smc_signal(df_l, df_h, pair, risk_pips=50):
+def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
     """Generate SMC trading signal using the MSNR Sniper Protocol.
 
     5-Layer Invalidation Filter:
@@ -575,6 +600,11 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
       Layer 3 (Physics): Compression arrival, not momentum? (If No → None)
       Layer 4 (Space):   RR > 1:2 to nearest roadblock? (If No → None)
       Layer 5 (Trigger): Gold=Sweep+Engulfing (HIGH) / Silver=Engulfing (MEDIUM)
+                         Touch Trade: Sweep+Zone+Compression bypasses engulfing
+
+    Args:
+        touch_trade: If True, allow signals without engulfing when a sweep is
+                     detected alongside a fresh zone and compression arrival.
 
     Returns signal dict or None. Dict shape unchanged for scanner.py compat.
     """
@@ -653,12 +683,18 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
         induce = detect_inducement_swept(df_l, swing_high, swing_low, "BUY")
         sweep_detected = induce["swept"]
 
-        # Must have at least engulfing to take the trade
+        # Layer 5 gate: engulfing required, OR touch trade (sweep bypasses engulfing)
+        is_touch = False
         if not engulfing:
-            return None
+            if touch_trade and sweep_detected:
+                is_touch = True  # Touch trade: sweep + zone + compression = go
+            else:
+                return None
 
         fvg_match = fvg == "BULL_FVG"
-        confidence = _compute_confidence(sweep_detected, engulfing, zone, fvg_match)
+        confidence = _compute_confidence(
+            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch
+        )
 
         # SL placement: below sweep wick if available, else below zone
         if sweep_detected and induce["wick_level"] is not None:
@@ -666,11 +702,14 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
         else:
             sl_anchor = zone["bottom"]
 
+        htf_extreme = df_h['high'].max()
         limit_levels = calculate_levels(
-            "BUY", entry_price, swing_high, sl_anchor, max_risk_price, tp_target
+            "BUY", entry_price, swing_high, sl_anchor, max_risk_price, tp_target,
+            htf_extreme=htf_extreme,
         )
         market_levels = calculate_levels(
-            "BUY", c['close'], swing_high, sl_anchor, max_risk_price, tp_target
+            "BUY", c['close'], swing_high, sl_anchor, max_risk_price, tp_target,
+            htf_extreme=htf_extreme,
         )
 
         return {
@@ -680,11 +719,15 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
             "market_e": c['close'],
             "market_sl": market_levels["sl"],
             "tp": limit_levels["tp"],
+            "tp1": limit_levels["tp1"],
+            "tp2": limit_levels["tp2"],
+            "tp3": limit_levels["tp3"],
             "confidence": confidence,
             "zone_type": zone["type"],
             "miss": zone["miss"],
             "sweep": sweep_detected,
             "arrival": "compression",
+            "touch": is_touch,
         }
 
     if bias == "BEAR":
@@ -719,22 +762,32 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
         induce = detect_inducement_swept(df_l, swing_high, swing_low, "SELL")
         sweep_detected = induce["swept"]
 
+        # Layer 5 gate: engulfing required, OR touch trade (sweep bypasses engulfing)
+        is_touch = False
         if not engulfing:
-            return None
+            if touch_trade and sweep_detected:
+                is_touch = True
+            else:
+                return None
 
         fvg_match = fvg == "BEAR_FVG"
-        confidence = _compute_confidence(sweep_detected, engulfing, zone, fvg_match)
+        confidence = _compute_confidence(
+            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch
+        )
 
         if sweep_detected and induce["wick_level"] is not None:
             sl_anchor = induce["wick_level"]
         else:
             sl_anchor = zone["top"]
 
+        htf_extreme = df_h['low'].min()
         limit_levels = calculate_levels(
-            "SELL", entry_price, sl_anchor, swing_low, max_risk_price, tp_target
+            "SELL", entry_price, sl_anchor, swing_low, max_risk_price, tp_target,
+            htf_extreme=htf_extreme,
         )
         market_levels = calculate_levels(
-            "SELL", c['close'], sl_anchor, swing_low, max_risk_price, tp_target
+            "SELL", c['close'], sl_anchor, swing_low, max_risk_price, tp_target,
+            htf_extreme=htf_extreme,
         )
 
         return {
@@ -744,11 +797,15 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50):
             "market_e": c['close'],
             "market_sl": market_levels["sl"],
             "tp": limit_levels["tp"],
+            "tp1": limit_levels["tp1"],
+            "tp2": limit_levels["tp2"],
+            "tp3": limit_levels["tp3"],
             "confidence": confidence,
             "zone_type": zone["type"],
             "miss": zone["miss"],
             "sweep": sweep_detected,
             "arrival": "compression",
+            "touch": is_touch,
         }
 
     return None

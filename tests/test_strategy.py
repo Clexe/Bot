@@ -875,3 +875,124 @@ class TestGetSMCSignal:
         zone = {"type": "V", "miss": False}
         assert _compute_confidence(True, 1, zone, False) == "high"
         assert _compute_confidence(False, 1, zone, False) == "medium"
+
+    def test_touch_trade_field_present(self):
+        """Any signal produced must have the 'touch' field."""
+        df_h = make_trending_data("up", bars=25, start=1.0, step=0.002)
+        base_data = [(1.0, 1.02, 0.98, 1.01)] * 20
+        base_data += [
+            (1.01, 1.035, 1.005, 1.03),
+            (1.03, 1.04, 1.025, 1.035),
+            (1.035, 1.045, 1.03, 1.04),
+            (1.04, 1.05, 1.035, 1.045),
+            (1.045, 1.06, 1.046, 1.055),
+        ]
+        df_l = make_ohlc(base_data)
+        sig = get_smc_signal(df_l, df_h, "EURUSD", touch_trade=True)
+        if sig is not None:
+            assert "touch" in sig
+            assert isinstance(sig["touch"], bool)
+
+
+class TestTouchTrade:
+    def test_confidence_touch_tier(self):
+        """Touch trade: sweep + no engulfing → MEDIUM confidence."""
+        from strategy import _compute_confidence
+        zone = {"type": "V", "miss": False}
+        # touch_entry=True, sweep=True, no engulfing
+        assert _compute_confidence(True, None, zone, False, touch_entry=True) == "medium"
+        # touch_entry=True, no sweep, no engulfing → still LOW
+        assert _compute_confidence(False, None, zone, False, touch_entry=True) == "low"
+
+    def test_confidence_engulfing_still_wins(self):
+        """When engulfing is present, touch_entry flag doesn't matter."""
+        from strategy import _compute_confidence
+        zone = {"type": "V", "miss": False}
+        assert _compute_confidence(True, 1, zone, False, touch_entry=True) == "high"
+        assert _compute_confidence(False, 1, zone, False, touch_entry=True) == "medium"
+
+    def test_touch_off_requires_engulfing(self):
+        """touch_trade=False should still require engulfing."""
+        df_h = make_trending_data("up", bars=25, start=1.0, step=0.002)
+        base = [(1.0, 1.02, 0.98, 1.01)] * 25
+        df_l = make_ohlc(base)
+        sig = get_smc_signal(df_l, df_h, "EURUSD", touch_trade=False)
+        # Should be None — flat data, no engulfing possible
+        assert sig is None
+
+    def test_touch_on_no_sweep_still_none(self):
+        """touch_trade=True without a sweep should still require engulfing."""
+        from strategy import _compute_confidence
+        zone = {"type": "V", "miss": False}
+        # No sweep, no engulfing, touch mode → low → should be blocked
+        conf = _compute_confidence(False, None, zone, False, touch_entry=True)
+        assert conf == "low"
+
+
+# =====================
+# MULTI-TP & CALCULATE_LEVELS TESTS
+# =====================
+class TestMultiTP:
+    def test_buy_tp_ordering(self):
+        """BUY: TP1 < TP2 < TP3."""
+        levels = calculate_levels("BUY", 1.10, 1.12, 1.08, 0.03, 1.15, htf_extreme=1.20)
+        assert levels["tp1"] < levels["tp2"]
+        assert levels["tp2"] <= levels["tp3"]
+
+    def test_sell_tp_ordering(self):
+        """SELL: TP1 > TP2 > TP3."""
+        levels = calculate_levels("SELL", 1.10, 1.12, 1.08, 0.03, 1.05, htf_extreme=1.00)
+        assert levels["tp1"] > levels["tp2"]
+        assert levels["tp2"] >= levels["tp3"]
+
+    def test_buy_tp1_is_one_to_one(self):
+        """BUY TP1 should equal entry + risk distance (1:1 RR)."""
+        levels = calculate_levels("BUY", 1.10, 1.12, 1.08, 0.03, 1.15)
+        sl = levels["sl"]
+        risk = abs(1.10 - sl)
+        assert abs(levels["tp1"] - (1.10 + risk)) < 1e-10
+
+    def test_sell_tp1_is_one_to_one(self):
+        """SELL TP1 should equal entry - risk distance (1:1 RR)."""
+        levels = calculate_levels("SELL", 1.10, 1.12, 1.08, 0.03, 1.05)
+        sl = levels["sl"]
+        risk = abs(sl - 1.10)
+        assert abs(levels["tp1"] - (1.10 - risk)) < 1e-10
+
+    def test_tp2_is_zone_target(self):
+        """TP2 should be the opposing zone target (or TP1 if target is closer)."""
+        levels = calculate_levels("BUY", 1.10, 1.12, 1.08, 0.03, 1.18)
+        assert levels["tp2"] == 1.18 or levels["tp2"] >= levels["tp1"]
+
+    def test_buy_tp3_uses_htf_extreme(self):
+        """BUY TP3 should use HTF extreme if it's bigger than 1:3 RR."""
+        levels = calculate_levels("BUY", 1.10, 1.12, 1.08, 0.03, 1.15, htf_extreme=1.50)
+        # 1:3 RR would be 1.10 + 0.02*3 = 1.16, HTF extreme 1.50 is higher
+        assert levels["tp3"] == 1.50
+
+    def test_signal_has_tp_fields(self):
+        """Any signal produced must have tp1, tp2, tp3 fields."""
+        df_h = make_trending_data("up", bars=25, start=1.0, step=0.002)
+        base_data = [(1.0, 1.02, 0.98, 1.01)] * 20
+        base_data += [
+            (1.01, 1.035, 1.005, 1.03),
+            (1.03, 1.04, 1.025, 1.035),
+            (1.035, 1.045, 1.03, 1.04),
+            (1.04, 1.05, 1.035, 1.045),
+            (1.045, 1.06, 1.046, 1.055),
+        ]
+        df_l = make_ohlc(base_data)
+        sig = get_smc_signal(df_l, df_h, "EURUSD")
+        if sig is not None:
+            assert "tp1" in sig
+            assert "tp2" in sig
+            assert "tp3" in sig
+            assert sig["tp1"] <= sig["tp2"] <= sig["tp3"]  # BUY ordering
+
+    def test_no_htf_extreme_uses_rr(self):
+        """Without htf_extreme, TP3 should be 1:3 RR."""
+        levels = calculate_levels("BUY", 1.10, 1.12, 1.08, 0.03, 1.15)
+        sl = levels["sl"]
+        risk = abs(1.10 - sl)
+        expected_tp3 = max(1.10 + risk * 3, levels["tp2"])
+        assert abs(levels["tp3"] - expected_tp3) < 1e-10

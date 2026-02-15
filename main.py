@@ -4,6 +4,7 @@ from config import BOT_TOKEN, logger
 from database import init_db
 from handlers import (
     start_command, mode_command, settf_command, sethtf_command, setrisk_command,
+    setbalance_command, setriskpct_command, touchmode_command,
     broadcast_command, users_command, handle_text,
 )
 from scanner import scanner_loop
@@ -30,6 +31,9 @@ def main():
     app.add_handler(CommandHandler("settf", settf_command))
     app.add_handler(CommandHandler("sethtf", sethtf_command))
     app.add_handler(CommandHandler("setrisk", setrisk_command))
+    app.add_handler(CommandHandler("setbalance", setbalance_command))
+    app.add_handler(CommandHandler("setriskpct", setriskpct_command))
+    app.add_handler(CommandHandler("touchmode", touchmode_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler("users", users_command))
 
