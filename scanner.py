@@ -2,6 +2,7 @@ import asyncio
 import time
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, BadRequest
+from datetime import datetime, timezone, timedelta
 from config import (
     SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS,
     ADAPTIVE_SCAN_INTERVALS, PAIR_THROTTLE_SECONDS,
@@ -60,6 +61,27 @@ async def check_signal_outcomes():
     Also feeds results into the drawdown circuit breaker.
     """
     open_signals = get_open_signals()
+
+    # Auto-expire trades older than SIGNAL_MAX_AGE_HOURS
+    now_utc = datetime.now(timezone.utc)
+    max_age = timedelta(hours=SIGNAL_MAX_AGE_HOURS)
+    active_signals = []
+    for sig in open_signals:
+        created = sig.get('created_at')
+        if created is not None:
+            # Handle naive datetime from DB (assume UTC)
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if now_utc - created > max_age:
+                update_signal_outcome(sig['id'], "EXPIRED", 0, 0)
+                logger.info(
+                    "Signal #%d %s %s auto-expired after %dh",
+                    sig['id'], sig['direction'], sig['pair'], SIGNAL_MAX_AGE_HOURS
+                )
+                continue
+        active_signals.append(sig)
+
+    open_signals = active_signals
     set_open_trade_count(len(open_signals))
 
     if not open_signals:
