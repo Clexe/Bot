@@ -353,6 +353,38 @@ def get_open_signals():
         return []
 
 
+def expire_stale_signals(max_age_hours=24):
+    """Auto-expire OPEN signals older than max_age_hours.
+
+    Signals that stay open beyond the max age are stale (price data
+    unavailable, bot restarted, etc.) and should not block the circuit
+    breaker indefinitely.  Returns the number of expired signals.
+    """
+    global _stats_cache_ts, _history_cache_ts
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE signal_history
+                SET outcome = 'EXPIRED', closed_at = CURRENT_TIMESTAMP,
+                    pnl_pips = 0
+                WHERE outcome = 'OPEN'
+                AND created_at < CURRENT_TIMESTAMP - INTERVAL '%s hours';
+            """, (max_age_hours,))
+            count = cur.rowcount
+            conn.commit()
+            cur.close()
+            if count > 0:
+                _stats_cache_ts = 0
+                _history_cache_ts = 0
+                logger.info("Auto-expired %d stale signals (older than %dh)",
+                            count, max_age_hours)
+            return count
+    except Exception as e:
+        logger.error("Failed to expire stale signals: %s", e)
+        return 0
+
+
 def get_signal_stats(pair=None, days=30):
     """Get signal performance statistics (cached for 60s)."""
     global _stats_cache, _stats_cache_ts

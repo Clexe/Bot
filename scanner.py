@@ -6,13 +6,14 @@ from config import (
     SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS,
     ADAPTIVE_SCAN_INTERVALS, PAIR_THROTTLE_SECONDS,
     USE_CORRELATION_FILTER, MAX_CURRENCY_EXPOSURE, MAX_CORR_GROUP_SAME_DIR,
-    AUTO_DISABLE_PAIR_LOSSES, logger,
+    AUTO_DISABLE_PAIR_LOSSES, SIGNAL_MAX_AGE_HOURS, logger,
 )
 from database import (
     load_users, get_user, deactivate_user, load_sent_signals,
     persist_sent_signal, cleanup_old_sent_signals,
     record_signal, get_open_signals, update_signal_outcome,
     update_signal_tp_stage, get_pair_consecutive_losses,
+    expire_stale_signals,
 )
 from fetchers import fetch_data, fetch_data_parallel, fetch_current_price
 from filters import is_in_session, is_market_open, is_news_blackout, check_spread_vs_risk
@@ -190,6 +191,9 @@ async def scanner_loop(app):
             # Periodic cleanup
             cleanup_old_signals(SENT_SIGNALS)
             cleanup_old_sent_signals()
+
+            # Auto-expire stale signals that have been open too long
+            expire_stale_signals(SIGNAL_MAX_AGE_HOURS)
 
             # Check outcomes of open signals
             await check_signal_outcomes()
