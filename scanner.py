@@ -5,7 +5,7 @@ from telegram.error import Forbidden, BadRequest
 from datetime import datetime, timezone, timedelta
 from config import (
     SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS,
-    ADAPTIVE_SCAN_INTERVALS, PAIR_THROTTLE_SECONDS,
+    ADAPTIVE_SCAN_INTERVALS,
     AUTO_DISABLE_PAIR_LOSSES, SIGNAL_MAX_AGE_HOURS, logger,
 )
 from database import (
@@ -33,7 +33,6 @@ IS_SCANNING = False
 SENT_SIGNALS = {}
 
 # Per-pair alert throttle: {pair: last_alert_timestamp}
-_pair_throttle = {}
 
 # Pairs flagged by journal intelligence (consecutive losses)
 _flagged_pairs = set()
@@ -285,11 +284,6 @@ async def scanner_loop(app):
                 recipients = pair_map[pair]
                 current_time = time.time()
 
-                # Per-pair alert throttle: skip if same pair alerted too recently
-                last_pair_alert = _pair_throttle.get(pair, 0)
-                if current_time - last_pair_alert < PAIR_THROTTLE_SECONDS:
-                    continue
-
                 # --- Journal Intelligence: skip flagged pairs ---
                 if pair in _flagged_pairs:
                     logger.info("Skipping %s — flagged for consecutive losses", pair)
@@ -370,7 +364,6 @@ async def scanner_loop(app):
                                     confidence=sig.get('confidence', 'medium'),
                                 )
                                 signal_recorded = True
-                                _pair_throttle[pair] = current_time
 
                             logger.info("Sent %s %s (%s) to %s [regime=%s]",
                                         sig['act'], pair, mode, uid,
