@@ -10,6 +10,7 @@ from database import (
     load_users, save_user_settings, deactivate_user, get_user,
     get_user_async, save_user_settings_async, load_users_async,
     get_signal_stats_async, get_recent_signals_async,
+    get_pair_breakdown_async, get_session_breakdown_async,
 )
 
 # Runtime state for multi-step text input flows
@@ -213,6 +214,113 @@ async def touchmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run backtest: /backtest XAUUSD 30  or  /backtest (uses watchlist, 30 days)."""
+    uid = str(update.effective_chat.id)
+    user = await get_user_async(uid)
+
+    # Parse args
+    pairs = list(user["pairs"])
+    days = 30
+    if context.args:
+        if context.args[0].upper() in KNOWN_SYMBOLS:
+            pairs = [context.args[0].upper()]
+        try:
+            days = int(context.args[-1])
+        except ValueError:
+            pass
+    days = max(7, min(days, 90))
+
+    await update.message.reply_text(
+        f"Running backtest on {', '.join(pairs)} ({days}d)... This may take a moment.",
+    )
+
+    from fetchers import fetch_data
+    from backtester import run_backtest, format_backtest_result
+
+    risk_pips = user.get("risk_pips", DEFAULT_SETTINGS["risk_pips"])
+    touch_trade = user.get("touch_trade", False)
+    mode = user.get("mode", "LIMIT")
+    ltf = user.get("timeframe", DEFAULT_SETTINGS["timeframe"])
+    htf = user.get("higher_tf", DEFAULT_SETTINGS["higher_tf"])
+
+    results = []
+    for pair in pairs[:5]:  # Cap at 5 pairs to avoid timeout
+        try:
+            df_l = await fetch_data(pair, ltf)
+            df_h = await fetch_data(pair, htf)
+            if df_l.empty or df_h.empty:
+                results.append(f"*{pair}*: No data available")
+                continue
+            bt = run_backtest(df_l, df_h, pair,
+                              risk_pips=risk_pips, touch_trade=touch_trade,
+                              mode=mode)
+            results.append(format_backtest_result(pair, bt["summary"], mode))
+        except Exception as e:
+            logger.warning("Backtest error for %s: %s", pair, e)
+            results.append(f"*{pair}*: Error during backtest")
+
+    if not results:
+        await update.message.reply_text("No pairs to backtest. Add pairs to your watchlist first.")
+        return
+
+    await update.message.reply_text(
+        "\n\n".join(results), parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def journal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analytics dashboard: /journal  or  /journal 7 (days)."""
+    days = 30
+    if context.args:
+        try:
+            days = int(context.args[0])
+        except ValueError:
+            pass
+    days = max(1, min(days, 90))
+
+    stats = await get_signal_stats_async(days=days)
+    pair_data = await get_pair_breakdown_async(days=days)
+    session_data = await get_session_breakdown_async(days=days)
+
+    lines = [f"*Analytics Dashboard ({days}d)*\n"]
+
+    # Overall stats
+    if stats and stats['total'] > 0:
+        closed = stats['wins'] + stats['losses']
+        lines.append(
+            f"*Overall*\n"
+            f"Signals: {stats['total']} | Closed: {closed}\n"
+            f"Win Rate: *{stats['win_rate']:.1f}%*\n"
+            f"P&L: *{stats['total_pips']:+.1f} pips* | Avg: {stats['avg_pips']:+.1f}/trade\n"
+        )
+    else:
+        lines.append("No signal data for this period.\n")
+
+    # Per-pair breakdown
+    if pair_data:
+        lines.append("*Per Pair*")
+        for p in pair_data[:10]:
+            icon = "+" if p['total_pips'] >= 0 else "-"
+            lines.append(
+                f"`{p['pair']:8s}` {p['wins']}W/{p['losses']}L "
+                f"({p['win_rate']}%) {icon}{abs(p['total_pips']):.1f}p"
+            )
+        lines.append("")
+
+    # Per-session breakdown
+    if session_data:
+        lines.append("*Per Session*")
+        for s in session_data:
+            icon = "+" if s['total_pips'] >= 0 else "-"
+            lines.append(
+                f"`{s['session']:10s}` {s['wins']}W/{s['losses']}L "
+                f"({s['win_rate']}%) {icon}{abs(s['total_pips']):.1f}p"
+            )
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: broadcast a message to all users."""
     sender_id = str(update.effective_user.id)
@@ -361,7 +469,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/setrisk - Set max risk in pips\n"
             "/setbalance - Set account balance for lot sizing\n"
             "/setriskpct - Set risk % per trade\n"
-            "/touchmode - Toggle touch trade mode\n\n"
+            "/touchmode - Toggle touch trade mode\n"
+            "/backtest - Run strategy backtest\n"
+            "/journal - Analytics dashboard\n\n"
             "*Menu:*\n"
             "add - Add pair to watchlist\n"
             "remove - Remove pair\n"

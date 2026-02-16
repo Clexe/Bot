@@ -182,6 +182,10 @@ ADAPTIVE_SCAN_INTERVALS = {
     "H1": 120,
 }
 
+# Per-pair alert throttle: minimum seconds between alerts on the same pair
+# Prevents spamming repeated signals on the same zone within a short window
+PAIR_THROTTLE_SECONDS = 300  # 5 minutes
+
 # Rate limiter settings
 RATE_LIMIT_MESSAGES_PER_SECOND = 25  # Telegram allows ~30, leave margin
 RATE_LIMIT_BURST = 5
