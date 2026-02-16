@@ -6,7 +6,6 @@ from datetime import datetime, timezone, timedelta
 from config import (
     SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS,
     ADAPTIVE_SCAN_INTERVALS, PAIR_THROTTLE_SECONDS,
-    USE_CORRELATION_FILTER, MAX_CURRENCY_EXPOSURE, MAX_CORR_GROUP_SAME_DIR,
     AUTO_DISABLE_PAIR_LOSSES, SIGNAL_MAX_AGE_HOURS, logger,
 )
 from database import (
@@ -21,7 +20,6 @@ from filters import is_in_session, is_market_open, is_news_blackout
 from strategy import get_smc_signal, get_pip_value
 from signals import format_signal_msg, should_send_signal, cleanup_old_signals
 from rate_limiter import rate_limiter
-from correlation import check_correlation
 from drawdown import (
     check_circuit_breaker, record_trade_result, set_open_trade_count,
     configure as configure_drawdown,
@@ -40,13 +38,6 @@ _pair_throttle = {}
 # Pairs flagged by journal intelligence (consecutive losses)
 _flagged_pairs = set()
 
-
-def _build_open_positions(open_signals):
-    """Build a list of open positions for correlation checking."""
-    return [
-        {"pair": s["pair"], "direction": s["direction"]}
-        for s in open_signals
-    ]
 
 
 async def check_signal_outcomes():
@@ -263,9 +254,6 @@ async def scanner_loop(app):
                     _flagged_pairs.add(p)
                     logger.info("Pair %s flagged: %d consecutive losses", p, streak)
 
-            # Get open positions for correlation checking
-            open_signals = get_open_signals()
-            open_positions = _build_open_positions(open_signals)
 
             # Fetch all timeframes needed
             # Collect unique timeframe combinations
@@ -339,18 +327,6 @@ async def scanner_loop(app):
                     if not sig:
                         continue
 
-                    # --- Correlation Filter ---
-                    if USE_CORRELATION_FILTER:
-                        corr_ok, corr_reason = check_correlation(
-                            pair, sig['act'], open_positions,
-                            max_currency_exposure=MAX_CURRENCY_EXPOSURE,
-                            max_group_same_dir=MAX_CORR_GROUP_SAME_DIR,
-                        )
-                        if not corr_ok:
-                            logger.info("Skipping %s %s — correlation: %s",
-                                        sig['act'], pair, corr_reason)
-                            continue
-
                     # Record signal once for tracking
                     signal_recorded = False
 
@@ -395,11 +371,6 @@ async def scanner_loop(app):
                                 )
                                 signal_recorded = True
                                 _pair_throttle[pair] = current_time
-
-                                # Add to open positions for next pair's correlation check
-                                open_positions.append({
-                                    "pair": pair, "direction": sig['act'],
-                                })
 
                             logger.info("Sent %s %s (%s) to %s [regime=%s]",
                                         sig['act'], pair, mode, uid,
