@@ -4,12 +4,13 @@ from telegram.constants import ParseMode
 from telegram.error import Forbidden, BadRequest
 from config import (
     SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS,
-    ADAPTIVE_SCAN_INTERVALS, logger,
+    ADAPTIVE_SCAN_INTERVALS, PAIR_THROTTLE_SECONDS, logger,
 )
 from database import (
     load_users, get_user, deactivate_user, load_sent_signals,
     persist_sent_signal, cleanup_old_sent_signals,
     record_signal, get_open_signals, update_signal_outcome,
+    update_signal_tp_stage,
 )
 from fetchers import fetch_data, fetch_data_parallel, fetch_current_price
 from filters import is_in_session, is_market_open, is_news_blackout
@@ -24,9 +25,17 @@ IS_SCANNING = False
 # In-memory sent signals (loaded from DB on startup)
 SENT_SIGNALS = {}
 
+# Per-pair alert throttle: {pair: last_alert_timestamp}
+_pair_throttle = {}
+
 
 async def check_signal_outcomes():
     """Check open signals against current prices to determine WIN/LOSS.
+
+    Trail stop logic:
+      - After TP1 hit: move SL to breakeven (entry price)
+      - After TP2 hit: trail SL to TP1 level
+      - TP3 or auto_win_pips: full close as WIN
 
     This runs each scan cycle and updates the signal_history table.
     """
@@ -52,37 +61,82 @@ async def check_signal_outcomes():
             tp = sig['tp_price']   # TP2 (zone target, primary TP)
             sl = sig['sl_price']
             direction = sig['direction']
+            tp_stage = sig.get('tp_stage', 0)  # 0=none, 1=TP1 hit, 2=TP2 hit
 
             outcome = None
             pnl_pips = 0
             auto_win_pips = 100
 
-            # TP1 = 1:1 RR breakeven level
-            risk_dist = abs(entry - sl)
+            # TP levels from risk distance
+            risk_dist = abs(entry - sl) if tp_stage == 0 else sig.get('original_risk', abs(entry - sl))
+
             if direction == "BUY":
                 tp1 = entry + risk_dist
+                tp3 = entry + risk_dist * 3  # fallback TP3
+
+                # Trail stop: adjust SL based on stage
+                effective_sl = sl
+                if tp_stage >= 2:
+                    effective_sl = tp1       # trail to TP1 after TP2 hit
+                elif tp_stage >= 1:
+                    effective_sl = entry     # breakeven after TP1 hit
+
                 current_pips = (price - entry) * pip_val
-                if price >= tp or current_pips >= auto_win_pips:
+
+                # Check TP progression
+                if price >= tp3 or current_pips >= auto_win_pips:
                     outcome = "WIN"
                     pnl_pips = current_pips
-                elif price <= sl:
-                    outcome = "LOSS"
-                    pnl_pips = (sl - entry) * pip_val
+                elif price >= tp and tp_stage < 2:
+                    # TP2 hit — trail SL to TP1, keep running for TP3
+                    update_signal_tp_stage(sig['id'], 2)
+                    logger.info("Signal #%d %s %s TP2 hit — trailing SL to TP1",
+                                sig['id'], direction, pair)
+                    continue
+                elif price >= tp1 and tp_stage < 1:
+                    # TP1 hit — move SL to breakeven
+                    update_signal_tp_stage(sig['id'], 1)
+                    logger.info("Signal #%d %s %s TP1 hit — SL moved to breakeven",
+                                sig['id'], direction, pair)
+                    continue
+                elif price <= effective_sl:
+                    outcome = "LOSS" if tp_stage == 0 else "WIN"
+                    pnl_pips = (effective_sl - entry) * pip_val
+
             elif direction == "SELL":
                 tp1 = entry - risk_dist
+                tp3 = entry - risk_dist * 3
+
+                effective_sl = sl
+                if tp_stage >= 2:
+                    effective_sl = tp1
+                elif tp_stage >= 1:
+                    effective_sl = entry
+
                 current_pips = (entry - price) * pip_val
-                if price <= tp or current_pips >= auto_win_pips:
+
+                if price <= tp3 or current_pips >= auto_win_pips:
                     outcome = "WIN"
                     pnl_pips = current_pips
-                elif price >= sl:
-                    outcome = "LOSS"
-                    pnl_pips = (entry - sl) * pip_val
+                elif price <= tp and tp_stage < 2:
+                    update_signal_tp_stage(sig['id'], 2)
+                    logger.info("Signal #%d %s %s TP2 hit — trailing SL to TP1",
+                                sig['id'], direction, pair)
+                    continue
+                elif price <= tp1 and tp_stage < 1:
+                    update_signal_tp_stage(sig['id'], 1)
+                    logger.info("Signal #%d %s %s TP1 hit — SL moved to breakeven",
+                                sig['id'], direction, pair)
+                    continue
+                elif price >= effective_sl:
+                    outcome = "LOSS" if tp_stage == 0 else "WIN"
+                    pnl_pips = (entry - effective_sl) * pip_val
 
             if outcome:
                 update_signal_outcome(sig['id'], outcome, price, round(pnl_pips, 1))
                 logger.info(
-                    "Signal #%d %s %s closed: %s (%.1f pips)",
-                    sig['id'], direction, pair, outcome, pnl_pips
+                    "Signal #%d %s %s closed: %s (%.1f pips) [stage=%d]",
+                    sig['id'], direction, pair, outcome, pnl_pips, tp_stage
                 )
 
 
@@ -163,6 +217,11 @@ async def scanner_loop(app):
                 recipients = pair_map[pair]
                 current_time = time.time()
 
+                # Per-pair alert throttle: skip if same pair alerted too recently
+                last_pair_alert = _pair_throttle.get(pair, 0)
+                if current_time - last_pair_alert < PAIR_THROTTLE_SECONDS:
+                    continue
+
                 # Group by timeframe + touch_trade settings
                 tf_groups = {}
                 for uid in recipients:
@@ -234,6 +293,7 @@ async def scanner_loop(app):
                                     entry_price, sig['tp'], sl_price,
                                 )
                                 signal_recorded = True
+                                _pair_throttle[pair] = current_time
 
                             logger.info("Sent %s %s (%s) to %s", sig['act'], pair, mode, uid)
                         except Forbidden:

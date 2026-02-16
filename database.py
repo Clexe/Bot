@@ -192,9 +192,17 @@ def init_db():
                     outcome VARCHAR(10) DEFAULT 'OPEN',
                     close_price DOUBLE PRECISION,
                     closed_at TIMESTAMP,
-                    pnl_pips DOUBLE PRECISION DEFAULT 0
+                    pnl_pips DOUBLE PRECISION DEFAULT 0,
+                    tp_stage INTEGER DEFAULT 0
                 );
             ''')
+            # Add tp_stage column if missing (existing DB migration)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE signal_history ADD COLUMN tp_stage INTEGER DEFAULT 0;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            """)
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS sent_signals (
                     signal_key VARCHAR(100) PRIMARY KEY,
@@ -276,13 +284,31 @@ def update_signal_outcome(signal_id, outcome, close_price, pnl_pips):
         logger.error("Failed to update signal outcome: %s", e)
 
 
+def update_signal_tp_stage(signal_id, stage):
+    """Update TP stage for trail stop management.
+
+    stage 0 = no TP hit, 1 = TP1 hit (SL→BE), 2 = TP2 hit (SL→TP1).
+    """
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE signal_history SET tp_stage = %s WHERE id = %s;
+            """, (stage, signal_id))
+            conn.commit()
+            cur.close()
+    except Exception as e:
+        logger.error("Failed to update TP stage for signal %s: %s", signal_id, e)
+
+
 def get_open_signals():
     """Get all signals that are still OPEN for outcome checking."""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, pair, direction, entry_price, tp_price, sl_price, mode
+                SELECT id, pair, direction, entry_price, tp_price, sl_price, mode,
+                       COALESCE(tp_stage, 0)
                 FROM signal_history
                 WHERE outcome = 'OPEN'
                 AND created_at > CURRENT_TIMESTAMP - INTERVAL '48 hours'
@@ -294,7 +320,8 @@ def get_open_signals():
                 {
                     "id": r[0], "pair": r[1], "direction": r[2],
                     "entry_price": r[3], "tp_price": r[4], "sl_price": r[5],
-                    "mode": r[6]
+                    "mode": r[6], "tp_stage": r[7],
+                    "original_risk": abs(r[3] - r[5]),
                 }
                 for r in rows
             ]
@@ -366,6 +393,86 @@ def get_signal_stats(pair=None, days=30):
 async def get_signal_stats_async(pair=None, days=30):
     """Async wrapper for get_signal_stats."""
     return await asyncio.to_thread(get_signal_stats, pair, days)
+
+
+def get_pair_breakdown(days=30):
+    """Get win rate and P&L breakdown per pair for analytics dashboard."""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT pair,
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
+                    COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
+                    COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
+                FROM signal_history
+                WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                GROUP BY pair
+                ORDER BY total_pips DESC;
+            """, (days,))
+            rows = cur.fetchall()
+            cur.close()
+            result = []
+            for r in rows:
+                closed = r[2] + r[3]
+                result.append({
+                    "pair": r[0], "total": r[1], "wins": r[2], "losses": r[3],
+                    "win_rate": round(r[2] / closed * 100, 1) if closed else 0,
+                    "total_pips": round(r[4], 1),
+                })
+            return result
+    except Exception as e:
+        logger.error("Failed to get pair breakdown: %s", e)
+        return []
+
+
+async def get_pair_breakdown_async(days=30):
+    """Async wrapper for get_pair_breakdown."""
+    return await asyncio.to_thread(get_pair_breakdown, days)
+
+
+def get_session_breakdown(days=30):
+    """Get performance breakdown by trading session (London/NY/Overlap)."""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT
+                    CASE
+                        WHEN EXTRACT(HOUR FROM created_at) BETWEEN 8 AND 12 THEN 'London'
+                        WHEN EXTRACT(HOUR FROM created_at) BETWEEN 13 AND 16 THEN 'Overlap'
+                        WHEN EXTRACT(HOUR FROM created_at) BETWEEN 17 AND 21 THEN 'New York'
+                        ELSE 'Off-Hours'
+                    END as session,
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
+                    COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
+                    COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
+                FROM signal_history
+                WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                GROUP BY session
+                ORDER BY total DESC;
+            """, (days,))
+            rows = cur.fetchall()
+            cur.close()
+            result = []
+            for r in rows:
+                closed = r[2] + r[3]
+                result.append({
+                    "session": r[0], "total": r[1], "wins": r[2], "losses": r[3],
+                    "win_rate": round(r[2] / closed * 100, 1) if closed else 0,
+                    "total_pips": round(r[4], 1),
+                })
+            return result
+    except Exception as e:
+        logger.error("Failed to get session breakdown: %s", e)
+        return []
+
+
+async def get_session_breakdown_async(days=30):
+    """Async wrapper for get_session_breakdown."""
+    return await asyncio.to_thread(get_session_breakdown, days)
 
 
 def get_recent_signals(limit=10):
