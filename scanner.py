@@ -16,7 +16,7 @@ from database import (
     expire_stale_signals,
 )
 from fetchers import fetch_data, fetch_data_parallel, fetch_current_price
-from filters import is_in_session, is_market_open, is_news_blackout, check_spread_vs_risk
+from filters import is_in_session, is_market_open, is_news_blackout
 from strategy import get_smc_signal, get_pip_value
 from signals import format_signal_msg, should_send_signal, cleanup_old_signals
 from rate_limiter import rate_limiter
@@ -316,16 +316,6 @@ async def scanner_loop(app):
 
                     if not sig:
                         continue
-
-                    # --- Spread Filter ---
-                    if df_l is not None and not df_l.empty:
-                        entry_price = sig['limit_e'] if user_list[0][1].get("mode") == "LIMIT" else sig['market_e']
-                        sl_price = sig['limit_sl'] if user_list[0][1].get("mode") == "LIMIT" else sig['market_sl']
-                        spread_ok, est_spread = check_spread_vs_risk(df_l, entry_price, sl_price)
-                        if not spread_ok:
-                            logger.info("Skipping %s %s — spread too wide (%.6f)",
-                                        sig['act'], pair, est_spread)
-                            continue
 
                     # --- Correlation Filter ---
                     if USE_CORRELATION_FILTER:

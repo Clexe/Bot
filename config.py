@@ -223,10 +223,6 @@ CONFIDENCE_SIZE_MULTIPLIERS = {
     "low": 0.5,      # Low confidence: 50%
 }
 
-# =====================
-# SPREAD FILTER
-# =====================
-MAX_SPREAD_RISK_PCT = 15  # Max spread as % of risk distance
 
 # =====================
 # DERIV CANDLE HISTORY
