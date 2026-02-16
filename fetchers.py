@@ -6,7 +6,7 @@ from pybit.unified_trading import HTTP
 from config import (
     DERIV_TOKEN, DERIV_APP_ID, BYBIT_KEY, BYBIT_SECRET,
     DERIV_SYMBOL_MAP, DERIV_KEYWORDS, DERIV_GRANULARITY, BYBIT_INTERVALS,
-    logger,
+    DERIV_CANDLE_COUNT, logger,
 )
 
 # Initialize Bybit client
@@ -83,7 +83,7 @@ async def _fetch_deriv(clean_pair, interval):
             await ws.send(json.dumps({
                 "ticks_history": mapped,
                 "adjust_start_time": 1,
-                "count": 100,
+                "count": DERIV_CANDLE_COUNT,
                 "end": "latest",
                 "style": "candles",
                 "granularity": gran,

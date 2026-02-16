@@ -11,7 +11,11 @@ from database import (
     get_user_async, save_user_settings_async, load_users_async,
     get_signal_stats_async, get_recent_signals_async,
     get_pair_breakdown_async, get_session_breakdown_async,
+    get_zone_type_stats_async, get_regime_stats_async,
 )
+from drawdown import get_drawdown_status, reset_streak
+from correlation import get_exposure_summary
+from database import get_open_signals
 
 # Runtime state for multi-step text input flows
 RUNTIME_STATE = {}
@@ -23,6 +27,7 @@ def _main_keyboard():
         [KeyboardButton("add"), KeyboardButton("remove"), KeyboardButton("pairs")],
         [KeyboardButton("/mode"), KeyboardButton("status"), KeyboardButton("setsession")],
         [KeyboardButton("stats"), KeyboardButton("history"), KeyboardButton("help")],
+        [KeyboardButton("exposure"), KeyboardButton("drawdown"), KeyboardButton("/journal")],
     ], resize_keyboard=True)
 
 
@@ -282,6 +287,8 @@ async def journal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = await get_signal_stats_async(days=days)
     pair_data = await get_pair_breakdown_async(days=days)
     session_data = await get_session_breakdown_async(days=days)
+    zone_data = await get_zone_type_stats_async(days=days)
+    regime_data = await get_regime_stats_async(days=days)
 
     lines = [f"*Analytics Dashboard ({days}d)*\n"]
 
@@ -316,6 +323,29 @@ async def journal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(
                 f"`{s['session']:10s}` {s['wins']}W/{s['losses']}L "
                 f"({s['win_rate']}%) {icon}{abs(s['total_pips']):.1f}p"
+            )
+        lines.append("")
+
+    # Per zone-type breakdown
+    if zone_data:
+        lines.append("*Per Zone Type*")
+        for z in zone_data:
+            icon = "+" if z['total_pips'] >= 0 else "-"
+            lines.append(
+                f"`{z['zone_type']:6s}` {z['wins']}W/{z['losses']}L "
+                f"({z['win_rate']}%) {icon}{abs(z['total_pips']):.1f}p"
+            )
+        lines.append("")
+
+    # Per regime breakdown
+    if regime_data:
+        lines.append("*Per Regime*")
+        for r in regime_data:
+            icon = "+" if r['total_pips'] >= 0 else "-"
+            regime_short = r['regime'].replace("TRENDING_", "T-")
+            lines.append(
+                f"`{regime_short:10s}` {r['wins']}W/{r['losses']}L "
+                f"({r['win_rate']}%) {icon}{abs(r['total_pips']):.1f}p"
             )
 
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
@@ -384,6 +414,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scan_interval = user.get("scan_interval", DEFAULT_SETTINGS["scan_interval"])
         remaining = max(0, scan_interval - time_diff)
         status_label = "SCANNING" if IS_SCANNING else f"IDLE ({remaining}s)"
+
+        # Drawdown status
+        dd = get_drawdown_status()
+        dd_line = (
+            f"\n*Risk Shield*\n"
+            f"Daily P&L: `{dd['daily_pnl']:+.0f}` / {dd['daily_limit']} pips\n"
+            f"Weekly P&L: `{dd['weekly_pnl']:+.0f}` / {dd['weekly_limit']} pips\n"
+            f"Loss Streak: {dd['consecutive_losses']}/{dd['max_streak']}\n"
+            f"Open Trades: {dd['open_trades']}/{dd['max_open']}"
+        )
+        if dd['paused']:
+            dd_line += f"\nPAUSED ({dd['pause_remaining_min']}min left)"
+
+        # Exposure
+        open_sigs = get_open_signals()
+        positions = [{"pair": s["pair"], "direction": s["direction"]} for s in open_sigs]
+        exposure = get_exposure_summary(positions)
+        exp_line = f"\n*Exposure:* {exposure}" if positions else ""
+
         await update.message.reply_text(
             f"*Status*\n"
             f"Mode: *{user.get('mode', 'MARKET')}*\n"
@@ -394,7 +443,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Touch Trade: *{'ON' if user.get('touch_trade') else 'OFF'}*\n"
             f"Pairs: {len(user['pairs'])}\n"
             f"Session: {user['session']}\n"
-            f"Scanner: {status_label}",
+            f"Scanner: {status_label}"
+            f"{dd_line}{exp_line}",
             parse_mode=ParseMode.MARKDOWN,
         )
 
@@ -460,6 +510,37 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
+    elif text == "resetstreak":
+        reset_streak()
+        await update.message.reply_text("Loss streak counter reset. Circuit breaker cleared.")
+
+    elif text == "exposure":
+        open_sigs = get_open_signals()
+        positions = [{"pair": s["pair"], "direction": s["direction"]} for s in open_sigs]
+        exposure = get_exposure_summary(positions)
+        open_list = "\n".join(
+            f"  {s['direction']} {s['pair']}" for s in open_sigs
+        ) if open_sigs else "  None"
+        await update.message.reply_text(
+            f"*Open Positions ({len(open_sigs)})*\n{open_list}\n\n"
+            f"*Exposure:* {exposure}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    elif text == "drawdown":
+        dd = get_drawdown_status()
+        status = "PAUSED" if dd['paused'] else "ACTIVE"
+        await update.message.reply_text(
+            f"*Risk Shield ({status})*\n"
+            f"Daily P&L: `{dd['daily_pnl']:+.0f}` / {dd['daily_limit']} pips\n"
+            f"Weekly P&L: `{dd['weekly_pnl']:+.0f}` / {dd['weekly_limit']} pips\n"
+            f"Loss Streak: {dd['consecutive_losses']}/{dd['max_streak']}\n"
+            f"Open Trades: {dd['open_trades']}/{dd['max_open']}\n"
+            + (f"Pause Remaining: {dd['pause_remaining_min']}min\n" if dd['paused'] else "")
+            + "\nType `resetstreak` to clear loss streak pause.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
     elif text == "help":
         await update.message.reply_text(
             "*Commands:*\n"
@@ -477,9 +558,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "remove - Remove pair\n"
             "pairs - View watchlist\n"
             "setsession - Set trading session\n"
-            "status - Check bot status\n"
+            "status - Check bot status + risk shield\n"
             "stats - View signal performance\n"
-            "history - Recent signal log",
+            "history - Recent signal log\n"
+            "exposure - View open positions & currency exposure\n"
+            "drawdown - View risk shield / circuit breaker status\n"
+            "resetstreak - Clear loss streak pause",
             parse_mode=ParseMode.MARKDOWN,
         )
 

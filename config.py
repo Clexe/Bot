@@ -189,3 +189,51 @@ PAIR_THROTTLE_SECONDS = 300  # 5 minutes
 # Rate limiter settings
 RATE_LIMIT_MESSAGES_PER_SECOND = 25  # Telegram allows ~30, leave margin
 RATE_LIMIT_BURST = 5
+
+# =====================
+# MARKET REGIME SETTINGS
+# =====================
+REGIME_ATR_PERIOD = 14
+REGIME_TREND_LOOKBACK = 20
+SKIP_VOLATILE_REGIME = True  # Skip signals in VOLATILE (chop) regime
+
+# =====================
+# CORRELATION FILTER SETTINGS
+# =====================
+MAX_CURRENCY_EXPOSURE = 2      # Max directional positions per currency
+MAX_CORR_GROUP_SAME_DIR = 2    # Max same-direction in correlation group
+USE_CORRELATION_FILTER = True
+
+# =====================
+# DRAWDOWN CIRCUIT BREAKER
+# =====================
+MAX_DAILY_LOSS_PIPS = -150     # Pause trading after this daily loss
+MAX_WEEKLY_LOSS_PIPS = -300    # Reduce size 50% after this weekly loss
+MAX_CONSECUTIVE_LOSSES = 4     # Pause after N consecutive losses
+LOSS_STREAK_PAUSE_HOURS = 4   # Hours to pause after loss streak
+MAX_OPEN_TRADES = 5            # Max concurrent open trades
+
+# =====================
+# ADAPTIVE POSITION SIZING
+# =====================
+CONFIDENCE_SIZE_MULTIPLIERS = {
+    "high": 1.5,     # Gold tier: 150% of base size
+    "medium": 1.0,   # Silver tier: 100% (standard)
+    "low": 0.5,      # Low confidence: 50%
+}
+
+# =====================
+# SPREAD FILTER
+# =====================
+MAX_SPREAD_RISK_PCT = 15  # Max spread as % of risk distance
+
+# =====================
+# DERIV CANDLE HISTORY
+# =====================
+DERIV_CANDLE_COUNT = 500  # Up from 100 — more structural context
+
+# =====================
+# JOURNAL INTELLIGENCE
+# =====================
+AUTO_DISABLE_PAIR_LOSSES = 5   # Auto-flag pair after N consecutive losses
+ZONE_TYPE_TRACKING = True      # Track win rate per zone type
