@@ -331,7 +331,7 @@ def get_open_signals():
             cur = conn.cursor()
             cur.execute("""
                 SELECT id, pair, direction, entry_price, tp_price, sl_price, mode,
-                       COALESCE(tp_stage, 0)
+                       COALESCE(tp_stage, 0), created_at
                 FROM signal_history
                 WHERE outcome = 'OPEN'
                 AND created_at > CURRENT_TIMESTAMP - INTERVAL '48 hours'
@@ -345,6 +345,7 @@ def get_open_signals():
                     "entry_price": r[3], "tp_price": r[4], "sl_price": r[5],
                     "mode": r[6], "tp_stage": r[7],
                     "original_risk": abs(r[3] - r[5]),
+                    "created_at": r[8],
                 }
                 for r in rows
             ]
