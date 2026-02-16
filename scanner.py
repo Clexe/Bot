@@ -5,14 +5,13 @@ from telegram.error import Forbidden, BadRequest
 from datetime import datetime, timezone, timedelta
 from config import (
     SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS,
-    ADAPTIVE_SCAN_INTERVALS,
-    AUTO_DISABLE_PAIR_LOSSES, SIGNAL_MAX_AGE_HOURS, logger,
+    ADAPTIVE_SCAN_INTERVALS, SIGNAL_MAX_AGE_HOURS, logger,
 )
 from database import (
     load_users, get_user, deactivate_user, load_sent_signals,
     persist_sent_signal, cleanup_old_sent_signals,
     record_signal, get_open_signals, update_signal_outcome,
-    update_signal_tp_stage, get_pair_consecutive_losses,
+    update_signal_tp_stage,
     expire_stale_signals,
 )
 from fetchers import fetch_data, fetch_data_parallel, fetch_current_price
@@ -20,10 +19,7 @@ from filters import is_in_session, is_market_open, is_news_blackout
 from strategy import get_smc_signal, get_pip_value
 from signals import format_signal_msg, should_send_signal, cleanup_old_signals
 from rate_limiter import rate_limiter
-from drawdown import (
-    check_circuit_breaker, record_trade_result, set_open_trade_count,
-    configure as configure_drawdown,
-)
+from drawdown import record_trade_result, set_open_trade_count
 
 # Global scanner state
 LAST_SCAN_TIME = 0
@@ -31,11 +27,6 @@ IS_SCANNING = False
 
 # In-memory sent signals (loaded from DB on startup)
 SENT_SIGNALS = {}
-
-# Per-pair alert throttle: {pair: last_alert_timestamp}
-
-# Pairs flagged by journal intelligence (consecutive losses)
-_flagged_pairs = set()
 
 
 
@@ -183,17 +174,6 @@ async def scanner_loop(app):
     # Load persisted sent signals state from database
     SENT_SIGNALS = load_sent_signals()
 
-    # Configure drawdown thresholds from config
-    from config import (
-        MAX_DAILY_LOSS_PIPS, MAX_WEEKLY_LOSS_PIPS, MAX_CONSECUTIVE_LOSSES,
-        LOSS_STREAK_PAUSE_HOURS, MAX_OPEN_TRADES,
-    )
-    configure_drawdown(
-        daily_loss=MAX_DAILY_LOSS_PIPS, weekly_loss=MAX_WEEKLY_LOSS_PIPS,
-        max_streak=MAX_CONSECUTIVE_LOSSES, pause_hours=LOSS_STREAK_PAUSE_HOURS,
-        max_open=MAX_OPEN_TRADES,
-    )
-
     while True:
         try:
             IS_SCANNING = True
@@ -209,14 +189,6 @@ async def scanner_loop(app):
 
             # Check outcomes of open signals
             await check_signal_outcomes()
-
-            # --- Circuit Breaker Check ---
-            cb_allowed, cb_reason, size_multiplier = check_circuit_breaker()
-            if not cb_allowed:
-                logger.info("Circuit breaker active: %s — skipping scan", cb_reason)
-                IS_SCANNING = False
-                await asyncio.sleep(SCAN_LOOP_INTERVAL)
-                continue
 
             # Build pair -> recipients map
             pair_map = {}
@@ -244,14 +216,6 @@ async def scanner_loop(app):
                 IS_SCANNING = False
                 await asyncio.sleep(SCAN_LOOP_INTERVAL)
                 continue
-
-            # --- Journal Intelligence: refresh flagged pairs ---
-            _flagged_pairs.clear()
-            for p in active_pairs:
-                streak = get_pair_consecutive_losses(p)
-                if streak >= AUTO_DISABLE_PAIR_LOSSES:
-                    _flagged_pairs.add(p)
-                    logger.info("Pair %s flagged: %d consecutive losses", p, streak)
 
 
             # Fetch all timeframes needed
@@ -283,11 +247,6 @@ async def scanner_loop(app):
             for pair in active_pairs:
                 recipients = pair_map[pair]
                 current_time = time.time()
-
-                # --- Journal Intelligence: skip flagged pairs ---
-                if pair in _flagged_pairs:
-                    logger.info("Skipping %s — flagged for consecutive losses", pair)
-                    continue
 
                 # Group by timeframe + touch_trade settings
                 tf_groups = {}
@@ -321,14 +280,20 @@ async def scanner_loop(app):
                     if not sig:
                         continue
 
+                    logger.info("Signal %s %s found — sending to %d users in group (%s/%s/tt=%s)",
+                                sig['act'], pair, len(user_list), ltf, htf, tt)
+
                     # Record signal once for tracking
                     signal_recorded = False
+                    sent_count = 0
+                    skipped_cooldown = 0
 
                     for uid, user_conf in user_list:
                         signal_key = f"{uid}_{pair}"
                         cooldown_sec = user_conf['cooldown'] * 60
 
                         if not should_send_signal(SENT_SIGNALS, signal_key, sig, cooldown_sec):
+                            skipped_cooldown += 1
                             continue
 
                         mode = user_conf.get("mode", "MARKET")
@@ -338,7 +303,6 @@ async def scanner_loop(app):
                         msg = format_signal_msg(
                             sig, pair, mode,
                             balance=balance, risk_pct=risk_pct, pip_value=pip_val,
-                            size_multiplier=size_multiplier,
                         )
                         entry_price = sig['limit_e'] if mode == "LIMIT" else sig['market_e']
                         sl_price = sig['limit_sl'] if mode == "LIMIT" else sig['market_sl']
@@ -365,6 +329,7 @@ async def scanner_loop(app):
                                 )
                                 signal_recorded = True
 
+                            sent_count += 1
                             logger.info("Sent %s %s (%s) to %s [regime=%s]",
                                         sig['act'], pair, mode, uid,
                                         sig.get('regime', 'N/A'))
@@ -375,6 +340,9 @@ async def scanner_loop(app):
                             logger.warning("Bad request sending to %s: %s", uid, e)
                         except Exception as e:
                             logger.error("Failed to send signal to %s: %s", uid, e)
+
+                    logger.info("Signal %s %s fan-out: %d sent, %d skipped (cooldown), %d total",
+                                sig['act'], pair, sent_count, skipped_cooldown, len(user_list))
 
             IS_SCANNING = False
 
