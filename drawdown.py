@@ -100,9 +100,8 @@ def check_circuit_breaker():
         remaining = int((_pause_until - now) / 60)
         return False, f"loss_streak_pause ({remaining}min remaining)", 0
 
-    # Check max open trades
-    if _open_trade_count >= MAX_OPEN_TRADES:
-        return False, f"max_open_trades ({_open_trade_count}/{MAX_OPEN_TRADES})", 0
+    # Max open trades check removed — this is a signal bot, not an execution bot.
+    # Open trade count is still tracked for display purposes only.
 
     # Check daily loss
     today = datetime.utcnow().strftime("%Y-%m-%d")
