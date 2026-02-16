@@ -212,6 +212,7 @@ MAX_WEEKLY_LOSS_PIPS = -300    # Reduce size 50% after this weekly loss
 MAX_CONSECUTIVE_LOSSES = 4     # Pause after N consecutive losses
 LOSS_STREAK_PAUSE_HOURS = 4   # Hours to pause after loss streak
 MAX_OPEN_TRADES = 5            # Max concurrent open trades
+SIGNAL_MAX_AGE_HOURS = 24      # Auto-expire signals older than this
 SIGNAL_MAX_AGE_HOURS = 24      # Auto-expire open trades older than this
 
 # =====================
@@ -223,10 +224,6 @@ CONFIDENCE_SIZE_MULTIPLIERS = {
     "low": 0.5,      # Low confidence: 50%
 }
 
-# =====================
-# SPREAD FILTER
-# =====================
-MAX_SPREAD_RISK_PCT = 15  # Max spread as % of risk distance
 
 # =====================
 # DERIV CANDLE HISTORY

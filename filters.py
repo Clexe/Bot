@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from config import (
     USE_NEWS_FILTER, NEWS_IMPACT, NEWS_CACHE_TTL, NEWS_BLACKOUT_MINUTES,
-    ALWAYS_OPEN_KEYS, MAX_SPREAD_RISK_PCT, logger,
+    ALWAYS_OPEN_KEYS, logger,
 )
 
 # Module-level state
@@ -97,40 +97,6 @@ def is_in_session(session_type):
     if session_type == "NY":
         return 13 <= now_hour <= 21
     return True  # BOTH
-
-
-def check_spread_vs_risk(df, entry_price, sl_price, max_pct=MAX_SPREAD_RISK_PCT):
-    """Check if the current spread is too wide relative to risk distance.
-
-    Estimates spread from the last candle's high-low range vs body size.
-    If spread > max_pct% of risk distance, the trade is not worth taking
-    (spread eats too much of the potential reward).
-
-    Returns (ok: bool, estimated_spread: float).
-    """
-    if df.empty or len(df) < 2:
-        return True, 0
-
-    risk_distance = abs(entry_price - sl_price)
-    if risk_distance <= 0:
-        return True, 0
-
-    # Estimate spread from recent candle structure:
-    # Average (high - low) - average |close - open| over last 5 candles
-    # This gives an approximation of the non-body range which includes spread
-    recent = df.iloc[-5:] if len(df) >= 5 else df
-    avg_range = (recent['high'] - recent['low']).mean()
-    avg_body = (recent['close'] - recent['open']).abs().mean()
-
-    # Spread estimate: range beyond body size (rough proxy)
-    spread_estimate = max(0, avg_range - avg_body) * 0.5  # conservative
-
-    spread_pct = (spread_estimate / risk_distance) * 100
-
-    if spread_pct > max_pct:
-        return False, round(spread_estimate, 6)
-
-    return True, round(spread_estimate, 6)
 
 
 def is_market_open(pair):
