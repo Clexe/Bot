@@ -203,6 +203,25 @@ def init_db():
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$;
             """)
+            # Add zone_type and regime columns for journal intelligence
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE signal_history ADD COLUMN zone_type VARCHAR(10) DEFAULT '';
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE signal_history ADD COLUMN regime VARCHAR(20) DEFAULT '';
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE signal_history ADD COLUMN confidence VARCHAR(10) DEFAULT 'medium';
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            """)
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS sent_signals (
                     signal_key VARCHAR(100) PRIMARY KEY,
@@ -238,7 +257,8 @@ _history_cache_ts = 0
 _HISTORY_CACHE_TTL = 60  # seconds
 
 
-def record_signal(pair, direction, mode, entry_price, tp_price, sl_price):
+def record_signal(pair, direction, mode, entry_price, tp_price, sl_price,
+                  zone_type="", regime="", confidence="medium"):
     """Record a new signal to the history table."""
     global _stats_cache_ts, _history_cache_ts
     try:
@@ -248,10 +268,13 @@ def record_signal(pair, direction, mode, entry_price, tp_price, sl_price):
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                INSERT INTO signal_history (pair, direction, mode, entry_price, tp_price, sl_price)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO signal_history
+                    (pair, direction, mode, entry_price, tp_price, sl_price,
+                     zone_type, regime, confidence)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id;
-            """, (pair, direction, mode, entry_price, tp_price, sl_price))
+            """, (pair, direction, mode, entry_price, tp_price, sl_price,
+                  zone_type, regime, confidence))
             signal_id = cur.fetchone()[0]
             conn.commit()
             cur.close()
@@ -514,6 +537,107 @@ def get_recent_signals(limit=10):
 async def get_recent_signals_async(limit=10):
     """Async wrapper for get_recent_signals."""
     return await asyncio.to_thread(get_recent_signals, limit)
+
+
+def get_pair_consecutive_losses(pair, limit=10):
+    """Count consecutive recent losses for a pair (for auto-disable)."""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT outcome FROM signal_history
+                WHERE pair = %s AND outcome IN ('WIN', 'LOSS')
+                ORDER BY created_at DESC
+                LIMIT %s;
+            """, (pair, limit))
+            rows = cur.fetchall()
+            cur.close()
+            streak = 0
+            for r in rows:
+                if r[0] == 'LOSS':
+                    streak += 1
+                else:
+                    break
+            return streak
+    except Exception as e:
+        logger.error("Failed to get pair loss streak for %s: %s", pair, e)
+        return 0
+
+
+def get_zone_type_stats(days=30):
+    """Get win rate breakdown by zone type for journal intelligence."""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT zone_type,
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
+                    COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
+                    COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
+                FROM signal_history
+                WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                  AND zone_type IS NOT NULL AND zone_type != ''
+                GROUP BY zone_type
+                ORDER BY total DESC;
+            """, (days,))
+            rows = cur.fetchall()
+            cur.close()
+            result = []
+            for r in rows:
+                closed = r[2] + r[3]
+                result.append({
+                    "zone_type": r[0], "total": r[1], "wins": r[2], "losses": r[3],
+                    "win_rate": round(r[2] / closed * 100, 1) if closed else 0,
+                    "total_pips": round(r[4], 1),
+                })
+            return result
+    except Exception as e:
+        logger.error("Failed to get zone type stats: %s", e)
+        return []
+
+
+async def get_zone_type_stats_async(days=30):
+    """Async wrapper for get_zone_type_stats."""
+    return await asyncio.to_thread(get_zone_type_stats, days)
+
+
+def get_regime_stats(days=30):
+    """Get win rate breakdown by market regime."""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT regime,
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
+                    COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
+                    COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
+                FROM signal_history
+                WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                  AND regime IS NOT NULL AND regime != ''
+                GROUP BY regime
+                ORDER BY total DESC;
+            """, (days,))
+            rows = cur.fetchall()
+            cur.close()
+            result = []
+            for r in rows:
+                closed = r[2] + r[3]
+                result.append({
+                    "regime": r[0], "total": r[1], "wins": r[2], "losses": r[3],
+                    "win_rate": round(r[2] / closed * 100, 1) if closed else 0,
+                    "total_pips": round(r[4], 1),
+                })
+            return result
+    except Exception as e:
+        logger.error("Failed to get regime stats: %s", e)
+        return []
+
+
+async def get_regime_stats_async(days=30):
+    """Async wrapper for get_regime_stats."""
+    return await asyncio.to_thread(get_regime_stats, days)
 
 
 # =====================

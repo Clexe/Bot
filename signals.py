@@ -1,18 +1,19 @@
 import time
-from config import SIGNAL_TTL, logger
+from config import SIGNAL_TTL, CONFIDENCE_SIZE_MULTIPLIERS, logger
 
 
-def _calc_lot_size(risk_pips, pip_value, balance, risk_pct):
+def _calc_lot_size(risk_pips, pip_value, balance, risk_pct, size_multiplier=1.0):
     """Calculate lot size from account balance and risk percentage.
 
-    Formula: lot = (balance * risk_pct / 100) / (risk_pips * pip_per_lot)
+    Formula: lot = (balance * risk_pct / 100) / (risk_pips * pip_per_lot) * multiplier
     pip_per_lot varies by asset, approximated from pip_value.
+
+    size_multiplier adjusts for:
+      - Confidence tier (high=1.5x, medium=1.0x, low=0.5x)
+      - Drawdown state (weekly drawdown=0.5x)
     """
     if risk_pips <= 0 or balance <= 0 or risk_pct <= 0:
         return None
-    # pip_per_lot: how many $ per pip per 1 standard lot
-    # pip_value 10000 → forex (10$ per pip/lot), pip_value 10 → JPY/metals (10$),
-    # pip_value 0.1 → BTC (~10$ per pip/lot at $100k BTC)
     if pip_value >= 10000:
         pip_per_lot = 10.0    # Standard forex
     elif pip_value >= 100:
@@ -23,19 +24,22 @@ def _calc_lot_size(risk_pips, pip_value, balance, risk_pct):
         pip_per_lot = 1.0     # Crypto
     risk_amount = balance * risk_pct / 100
     lot = risk_amount / (risk_pips * pip_per_lot)
-    return round(lot, 2)
+    lot *= size_multiplier
+    return round(max(lot, 0.01), 2)
 
 
-def format_signal_msg(sig, pair, mode, balance=0, risk_pct=1, pip_value=None):
-    """Format a signal message with multi-TP levels and R:R ratio.
+def format_signal_msg(sig, pair, mode, balance=0, risk_pct=1, pip_value=None,
+                      size_multiplier=1.0):
+    """Format a signal message with multi-TP levels, R:R, regime, and volume info.
 
     Args:
-        sig: Signal dict with act, limit_e, limit_sl, market_e, market_sl, tp, tp1, tp2, tp3
+        sig: Signal dict from strategy
         pair: Symbol name
         mode: 'MARKET' or 'LIMIT'
         balance: User's account balance (0 = don't show lot size)
         risk_pct: Risk percentage per trade
         pip_value: Pip value divisor for lot size calculation
+        size_multiplier: Drawdown-adjusted multiplier for lot size
 
     Returns:
         Formatted message string
@@ -62,15 +66,22 @@ def format_signal_msg(sig, pair, mode, balance=0, risk_pct=1, pip_value=None):
     risk_pips_val = risk * pip_value if pip_value else 0
     risk_line = f"\nRisk: `{risk_pips_val:.1f}` pips" if risk_pips_val > 0 else ""
 
-    # Lot size
+    # Adaptive lot size: confidence tier * drawdown multiplier
     lot_line = ""
+    confidence = sig.get('confidence', 'medium')
+    conf_mult = CONFIDENCE_SIZE_MULTIPLIERS.get(confidence, 1.0)
+    total_mult = conf_mult * size_multiplier
+
     if balance > 0 and pip_value and risk_pips_val > 0:
-        lot = _calc_lot_size(risk_pips_val, pip_value, balance, risk_pct)
+        lot = _calc_lot_size(risk_pips_val, pip_value, balance, risk_pct,
+                             size_multiplier=total_mult)
         if lot and lot > 0:
-            lot_line = f"\nLot: `{lot}` ({risk_pct}% of ${balance:,.0f})"
+            mult_note = ""
+            if total_mult != 1.0:
+                mult_note = f" x{total_mult:.1f}"
+            lot_line = f"\nLot: `{lot}` ({risk_pct}% of ${balance:,.0f}{mult_note})"
 
     # Confidence + trigger info
-    confidence = sig.get('confidence', 'medium').upper()
     trigger_parts = []
     if sig.get('touch'):
         trigger_parts.append("TOUCH")
@@ -79,8 +90,17 @@ def format_signal_msg(sig, pair, mode, balance=0, risk_pct=1, pip_value=None):
     trigger_tag = " | ".join(trigger_parts) if trigger_parts else ""
     trigger_line = f"\n{trigger_tag}" if trigger_tag else ""
 
+    # Regime + volume proxy context line
+    regime = sig.get('regime', '')
+    vol_proxy = sig.get('volume_proxy', 0)
+    vol_label = "HIGH" if vol_proxy >= 0.65 else "MED" if vol_proxy >= 0.4 else "LOW"
+    context_line = ""
+    if regime:
+        regime_short = regime.replace("TRENDING_", "T-").replace("RANGING", "RANGE")
+        context_line = f"\nRegime: {regime_short} | Vol: {vol_label}"
+
     return (
-        f"{emoji} *SMC SIGNAL ({label})* [{confidence}]\n"
+        f"{emoji} *SMC SIGNAL ({label})* [{confidence.upper()}]\n"
         f"Symbol: `{pair}`\n"
         f"Action: *{sig['act']} {label}*\n"
         f"Entry: `{entry:.5f}`\n"
@@ -88,7 +108,7 @@ def format_signal_msg(sig, pair, mode, balance=0, risk_pct=1, pip_value=None):
         f"TP2: `{tp2:.5f}` (Zone)\n"
         f"TP3: `{tp3:.5f}` (Runner)\n"
         f"SL: `{sl:.5f}`\n"
-        f"R:R = *1:{rr}*{risk_line}{lot_line}{trigger_line}"
+        f"R:R = *1:{rr}*{risk_line}{lot_line}{trigger_line}{context_line}"
     )
 
 

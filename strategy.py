@@ -1,5 +1,6 @@
 import pandas as pd
-from config import HIGH_PIP_SYMBOLS
+from config import HIGH_PIP_SYMBOLS, SKIP_VOLATILE_REGIME
+from regime import detect_regime, should_skip_regime
 
 
 def get_pip_value(pair):
@@ -281,6 +282,49 @@ def detect_fvg(df_l):
     if c3.high < c1.low:
         return "BEAR_FVG"
     return None
+
+
+def compute_volume_proxy(df, zone, lookback=5):
+    """Estimate institutional participation at a zone using candle structure.
+
+    Without real volume data, we use body-to-wick ratio and candle size as
+    a proxy for conviction. Large bodies with small wicks = strong conviction.
+
+    Returns a score 0.0 to 1.0 (higher = more institutional interest).
+    """
+    if len(df) < lookback:
+        return 0.5  # neutral
+
+    zone_mid = (zone["top"] + zone["bottom"]) / 2
+    zone_range = zone["top"] - zone["bottom"]
+    if zone_range <= 0:
+        return 0.5
+
+    # Look at candles near the zone formation
+    start = max(0, zone["bar_index"] - 1)
+    end = min(len(df), zone["bar_index"] + lookback + 1)
+    nearby = df.iloc[start:end]
+
+    if nearby.empty:
+        return 0.5
+
+    scores = []
+    for _, c in nearby.iterrows():
+        body = abs(c['close'] - c['open'])
+        total_range = c['high'] - c['low']
+        if total_range <= 0:
+            continue
+
+        # Body-to-range ratio: higher = more conviction
+        body_ratio = body / total_range
+
+        # Size relative to average: bigger candles = more volume
+        avg_body = (df['close'] - df['open']).abs().mean()
+        size_score = min(body / avg_body, 2.0) / 2.0 if avg_body > 0 else 0.5
+
+        scores.append((body_ratio * 0.6 + size_score * 0.4))
+
+    return round(sum(scores) / len(scores), 3) if scores else 0.5
 
 
 def calculate_levels(sig_type, entry, swing_high, swing_low, max_risk_price, tp_target,
@@ -614,6 +658,12 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
     pip_val = get_pip_value(pair)
     max_risk_price = risk_pips / pip_val
 
+    # --- Regime Detection (pre-filter) ---
+    regime_info = detect_regime(df_l)
+
+    if SKIP_VOLATILE_REGIME and regime_info["regime"] == "VOLATILE":
+        return None  # Don't trade chop
+
     # --- Layer 2: H4 Storyline ---
     storyline = detect_storyline(df_h, df_l)
     if storyline is None:
@@ -648,6 +698,11 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
     all_fresh_ltf = [z for z in all_fresh_ltf if z["fresh"]]
 
     if bias == "BULL":
+        # Regime counter-trend check
+        skip, _ = should_skip_regime(regime_info, "BUY")
+        if skip:
+            return None
+
         # --- Layer 1: Fresh Zone ---
         fresh = get_fresh_zones(df_l, "demand")
         zone = fresh[0] if fresh else None
@@ -712,6 +767,8 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             htf_extreme=htf_extreme,
         )
 
+        vol_proxy = compute_volume_proxy(df_l, zone)
+
         return {
             "act": "BUY",
             "limit_e": entry_price,
@@ -728,9 +785,18 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             "sweep": sweep_detected,
             "arrival": "compression",
             "touch": is_touch,
+            "regime": regime_info["regime"],
+            "atr": regime_info["atr"],
+            "sl_multiplier": regime_info["sl_multiplier"],
+            "volume_proxy": vol_proxy,
         }
 
     if bias == "BEAR":
+        # Regime counter-trend check
+        skip, _ = should_skip_regime(regime_info, "SELL")
+        if skip:
+            return None
+
         # --- Layer 1: Fresh Zone ---
         fresh = get_fresh_zones(df_l, "supply")
         zone = fresh[0] if fresh else None
@@ -790,6 +856,8 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             htf_extreme=htf_extreme,
         )
 
+        vol_proxy = compute_volume_proxy(df_l, zone)
+
         return {
             "act": "SELL",
             "limit_e": entry_price,
@@ -806,6 +874,10 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             "sweep": sweep_detected,
             "arrival": "compression",
             "touch": is_touch,
+            "regime": regime_info["regime"],
+            "atr": regime_info["atr"],
+            "sl_multiplier": regime_info["sl_multiplier"],
+            "volume_proxy": vol_proxy,
         }
 
     return None
