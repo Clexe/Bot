@@ -198,13 +198,6 @@ REGIME_TREND_LOOKBACK = 20
 SKIP_VOLATILE_REGIME = True  # Skip signals in VOLATILE (chop) regime
 
 # =====================
-# CORRELATION FILTER SETTINGS
-# =====================
-MAX_CURRENCY_EXPOSURE = 2      # Max directional positions per currency
-MAX_CORR_GROUP_SAME_DIR = 2    # Max same-direction in correlation group
-USE_CORRELATION_FILTER = True
-
-# =====================
 # DRAWDOWN CIRCUIT BREAKER
 # =====================
 MAX_DAILY_LOSS_PIPS = -150     # Pause trading after this daily loss
