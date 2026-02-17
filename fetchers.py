@@ -13,6 +13,130 @@ from config import (
 bybit = HTTP(testnet=False, api_key=BYBIT_KEY, api_secret=BYBIT_SECRET)
 
 
+class DerivSession:
+    """Persistent Deriv WebSocket session with request multiplexing.
+
+    Maintains a single WebSocket connection, authenticates once, and
+    multiplexes concurrent requests using req_id matching. Reconnects
+    automatically on failure.
+    """
+
+    def __init__(self, max_concurrent=5):
+        self._ws = None
+        self._authorized = False
+        self._connect_lock = asyncio.Lock()
+        self._pending = {}       # req_id -> Future
+        self._next_id = 1
+        self._reader_task = None
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _ensure_connected(self):
+        """Connect and authorize if not already connected."""
+        if self._ws and self._authorized:
+            return
+        async with self._connect_lock:
+            # Double-check after acquiring lock
+            if self._ws and self._authorized:
+                return
+            await self._connect()
+
+    async def _connect(self):
+        """Open WebSocket and authorize."""
+        # Clean up old connection
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+
+        self._authorized = False
+        self._ws = None
+
+        uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+        self._ws = await websockets.connect(uri, close_timeout=10)
+
+        # Authorize
+        await self._ws.send(json.dumps({"authorize": DERIV_TOKEN}))
+        for _ in range(5):
+            msg = json.loads(await asyncio.wait_for(self._ws.recv(), timeout=10))
+            if "authorize" in msg:
+                self._authorized = True
+                break
+            if "error" in msg:
+                raise ConnectionError(f"Deriv auth error: {msg['error']}")
+        if not self._authorized:
+            raise ConnectionError("Deriv auth timeout")
+
+        # Start background reader
+        self._reader_task = asyncio.create_task(self._reader())
+        logger.info("Deriv WebSocket session connected")
+
+    async def _reader(self):
+        """Background task: read responses and dispatch to pending futures."""
+        try:
+            async for raw in self._ws:
+                msg = json.loads(raw)
+                req_id = msg.get("req_id")
+                if req_id and req_id in self._pending:
+                    fut = self._pending.pop(req_id)
+                    if not fut.done():
+                        fut.set_result(msg)
+        except (websockets.exceptions.ConnectionClosed, Exception):
+            pass
+        finally:
+            # Connection lost — fail all pending requests
+            self._authorized = False
+            for fut in self._pending.values():
+                if not fut.done():
+                    fut.set_exception(ConnectionError("WebSocket closed"))
+            self._pending.clear()
+
+    async def request(self, payload, timeout=15):
+        """Send a request and wait for the matching response."""
+        async with self._semaphore:
+            # Ensure connected (reconnect if needed)
+            try:
+                await self._ensure_connected()
+            except Exception as e:
+                raise ConnectionError(f"Deriv connect failed: {e}")
+
+            req_id = self._next_id
+            self._next_id += 1
+            payload["req_id"] = req_id
+
+            loop = asyncio.get_event_loop()
+            future = loop.create_future()
+            self._pending[req_id] = future
+
+            try:
+                await self._ws.send(json.dumps(payload))
+                return await asyncio.wait_for(future, timeout=timeout)
+            except (websockets.exceptions.ConnectionClosed, ConnectionError):
+                # Connection died mid-request — force reconnect on next call
+                self._authorized = False
+                raise
+            finally:
+                self._pending.pop(req_id, None)
+
+    async def close(self):
+        """Shut down the session."""
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+        self._ws = None
+        self._authorized = False
+
+
+# Global session instance
+_deriv_session = DerivSession(max_concurrent=5)
+
+
 def is_deriv_pair(clean_pair):
     """Determine if a symbol should be fetched from Deriv."""
     return any(x in clean_pair for x in DERIV_KEYWORDS)
@@ -58,43 +182,24 @@ async def fetch_data_parallel(pairs, interval):
 
 
 async def _fetch_deriv(clean_pair, interval):
-    """Fetch candle data from Deriv WebSocket API."""
+    """Fetch candle data from Deriv via shared WebSocket session."""
     mapped = DERIV_SYMBOL_MAP.get(clean_pair, clean_pair)
-    uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
     gran = DERIV_GRANULARITY.get(interval, 900)
     try:
-        async with websockets.connect(uri, close_timeout=10) as ws:
-            # Authorize
-            await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
-            auth_res = None
-            for _ in range(5):
-                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                if "authorize" in msg:
-                    auth_res = msg
-                    break
-                if "error" in msg:
-                    logger.warning("Deriv auth error for %s: %s", clean_pair, msg["error"])
-                    return pd.DataFrame()
-            if auth_res is None:
-                logger.warning("Deriv auth timeout for %s", clean_pair)
-                return pd.DataFrame()
-
-            # Fetch candles
-            await ws.send(json.dumps({
-                "ticks_history": mapped,
-                "adjust_start_time": 1,
-                "count": DERIV_CANDLE_COUNT,
-                "end": "latest",
-                "style": "candles",
-                "granularity": gran,
-            }))
-            res = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
-            if not res.get("candles"):
-                if "error" in res:
-                    logger.warning("Deriv candles error for %s: %s", clean_pair, res["error"])
-                return pd.DataFrame()
-            df = pd.DataFrame(res["candles"])
-            return df[['open', 'high', 'low', 'close']].apply(pd.to_numeric)
+        res = await _deriv_session.request({
+            "ticks_history": mapped,
+            "adjust_start_time": 1,
+            "count": DERIV_CANDLE_COUNT,
+            "end": "latest",
+            "style": "candles",
+            "granularity": gran,
+        }, timeout=15)
+        if not res.get("candles"):
+            if "error" in res:
+                logger.warning("Deriv candles error for %s: %s", clean_pair, res["error"])
+            return pd.DataFrame()
+        df = pd.DataFrame(res["candles"])
+        return df[['open', 'high', 'low', 'close']].apply(pd.to_numeric)
     except asyncio.TimeoutError:
         logger.warning("Deriv WebSocket timeout for %s", clean_pair)
         return pd.DataFrame()
@@ -135,26 +240,16 @@ async def fetch_current_price(pair):
 
 
 async def _get_deriv_price(clean_pair):
-    """Get current tick price from Deriv."""
+    """Get current tick price from Deriv via shared WebSocket session."""
     mapped = DERIV_SYMBOL_MAP.get(clean_pair, clean_pair)
-    uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
     try:
-        async with websockets.connect(uri, close_timeout=10) as ws:
-            await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
-            for _ in range(5):
-                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                if "authorize" in msg:
-                    break
-                if "error" in msg:
-                    return None
-            else:
-                return None
-
-            await ws.send(json.dumps({"ticks": mapped, "subscribe": 0}))
-            res = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-            if "tick" in res:
-                return float(res["tick"]["quote"])
-            return None
+        res = await _deriv_session.request({
+            "ticks": mapped,
+            "subscribe": 0,
+        }, timeout=10)
+        if "tick" in res:
+            return float(res["tick"]["quote"])
+        return None
     except Exception as e:
         logger.error("Deriv price fetch error for %s: %s", clean_pair, e)
         return None
