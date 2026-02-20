@@ -682,7 +682,8 @@ def load_sent_signals():
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT signal_key, price, direction
+                SELECT signal_key, price, direction,
+                       EXTRACT(EPOCH FROM created_at)
                 FROM sent_signals
                 WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '4 hours';
             """)
@@ -693,7 +694,7 @@ def load_sent_signals():
                 signals[r[0]] = {
                     "price": r[1],
                     "direction": r[2],
-                    "time": 0,
+                    "time": r[3],
                 }
             logger.info("Loaded %d persisted signal states", len(signals))
             return signals
