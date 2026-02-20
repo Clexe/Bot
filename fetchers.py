@@ -208,11 +208,22 @@ async def _fetch_deriv(clean_pair, interval):
         return pd.DataFrame()
 
 
+def _bybit_category(symbol):
+    """Return the correct Bybit category for a symbol.
+
+    USDT pairs are 'linear' (perpetual), bare USD pairs are 'inverse'.
+    """
+    if symbol.endswith("USDT"):
+        return "linear"
+    return "inverse"
+
+
 def _fetch_bybit(clean_pair, interval):
     """Fetch candle data from Bybit REST API."""
     try:
         tf = BYBIT_INTERVALS.get(interval, "15")
-        resp = bybit.get_kline(category="linear", symbol=clean_pair, interval=tf, limit=100)
+        category = _bybit_category(clean_pair)
+        resp = bybit.get_kline(category=category, symbol=clean_pair, interval=tf, limit=100)
         if not resp or 'result' not in resp or not resp['result'].get('list'):
             logger.warning("Bybit empty response for %s", clean_pair)
             return pd.DataFrame()
@@ -258,7 +269,8 @@ async def _get_deriv_price(clean_pair):
 def _get_bybit_price(clean_pair):
     """Get current ticker price from Bybit."""
     try:
-        resp = bybit.get_tickers(category="linear", symbol=clean_pair)
+        category = _bybit_category(clean_pair)
+        resp = bybit.get_tickers(category=category, symbol=clean_pair)
         if resp and 'result' in resp and resp['result'].get('list'):
             return float(resp['result']['list'][0]['lastPrice'])
         return None

@@ -5,7 +5,7 @@ from telegram.error import Forbidden, BadRequest
 from datetime import datetime, timezone, timedelta
 from config import (
     SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS,
-    ADAPTIVE_SCAN_INTERVALS, SIGNAL_MAX_AGE_HOURS, logger,
+    ADAPTIVE_SCAN_INTERVALS, SIGNAL_MAX_AGE_HOURS, AUTO_WIN_PIPS, logger,
 )
 from database import (
     load_users, get_user, deactivate_user, load_sent_signals,
@@ -36,7 +36,7 @@ async def check_signal_outcomes():
     Trail stop logic:
       - After TP1 hit: move SL to breakeven (entry price)
       - After TP2 hit: trail SL to TP1 level
-      - TP3 or auto_win_pips: full close as WIN
+      - TP3 or AUTO_WIN_PIPS: full close as WIN
 
     This runs each scan cycle and updates the signal_history table.
     Also feeds results into the drawdown circuit breaker.
@@ -74,6 +74,7 @@ async def check_signal_outcomes():
     for pair in pairs:
         price = await fetch_current_price(pair)
         if price is None:
+            logger.warning("Outcome check skipped for %s — price fetch returned None", pair)
             continue
 
         pip_val = get_pip_value(pair)
@@ -90,7 +91,6 @@ async def check_signal_outcomes():
 
             outcome = None
             pnl_pips = 0
-            auto_win_pips = 100
 
             # TP levels from risk distance
             risk_dist = abs(entry - sl) if tp_stage == 0 else sig.get('original_risk', abs(entry - sl))
@@ -109,7 +109,7 @@ async def check_signal_outcomes():
                 current_pips = (price - entry) * pip_val
 
                 # Check TP progression
-                if price >= tp3 or current_pips >= auto_win_pips:
+                if price >= tp3 or current_pips >= AUTO_WIN_PIPS:
                     outcome = "WIN"
                     pnl_pips = current_pips
                 elif price >= tp and tp_stage < 2:
@@ -140,7 +140,7 @@ async def check_signal_outcomes():
 
                 current_pips = (entry - price) * pip_val
 
-                if price <= tp3 or current_pips >= auto_win_pips:
+                if price <= tp3 or current_pips >= AUTO_WIN_PIPS:
                     outcome = "WIN"
                     pnl_pips = current_pips
                 elif price <= tp and tp_stage < 2:
