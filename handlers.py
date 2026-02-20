@@ -4,7 +4,7 @@ from telegram.error import Forbidden
 from telegram.ext import ContextTypes
 from config import (
     ADMIN_ID, DEFAULT_SETTINGS, KNOWN_SYMBOLS, VALID_SESSIONS, VALID_MODES,
-    VALID_TIMEFRAMES, VALID_HIGHER_TFS, logger,
+    VALID_TIMEFRAMES, VALID_HIGHER_TFS, FOREX_BASES, logger,
 )
 from database import (
     load_users, save_user_settings, deactivate_user, get_user,
@@ -581,6 +581,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 skipped.append(f"{symbol} (already added)")
             elif symbol not in KNOWN_SYMBOLS and not symbol.endswith("USDT"):
                 skipped.append(f"{symbol} (unknown)")
+            elif symbol.endswith("USDT") and symbol[:-4] in FOREX_BASES:
+                skipped.append(f"{symbol} (forex pair, not available on Bybit)")
             else:
                 user["pairs"].append(symbol)
                 added.append(symbol)

@@ -5,7 +5,7 @@ from telegram.error import Forbidden, BadRequest
 from datetime import datetime, timezone, timedelta
 from config import (
     SCAN_LOOP_INTERVAL, SCAN_ERROR_INTERVAL, DEFAULT_SETTINGS, KNOWN_SYMBOLS,
-    ADAPTIVE_SCAN_INTERVALS, SIGNAL_MAX_AGE_HOURS, AUTO_WIN_PIPS, logger,
+    ADAPTIVE_SCAN_INTERVALS, SIGNAL_MAX_AGE_HOURS, AUTO_WIN_PIPS, FOREX_BASES, logger,
 )
 from database import (
     load_users, get_user, deactivate_user, load_sent_signals,
@@ -198,6 +198,8 @@ async def scanner_loop(app):
                 for pair in settings["pairs"]:
                     clean_p = pair.replace("\n", "").replace("\r", "").strip().upper()
                     if not clean_p or (clean_p not in KNOWN_SYMBOLS and not clean_p.endswith("USDT")):
+                        continue
+                    if clean_p.endswith("USDT") and clean_p[:-4] in FOREX_BASES:
                         continue
                     if clean_p not in pair_map:
                         pair_map[clean_p] = []
