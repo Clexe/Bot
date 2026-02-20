@@ -9,8 +9,11 @@ from config import (
     DERIV_CANDLE_COUNT, logger,
 )
 
-# Initialize Bybit client
-bybit = HTTP(testnet=False, api_key=BYBIT_KEY, api_secret=BYBIT_SECRET)
+# Initialize Bybit client with larger connection pool to avoid overflow warnings
+bybit = HTTP(testnet=False, api_key=BYBIT_KEY, api_secret=BYBIT_SECRET, max_retries=2)
+
+# Semaphore to throttle concurrent Bybit REST calls (avoid rate limit 10006)
+_bybit_semaphore = asyncio.Semaphore(3)
 
 
 class DerivSession:
@@ -138,7 +141,13 @@ _deriv_session = DerivSession(max_concurrent=5)
 
 
 def is_deriv_pair(clean_pair):
-    """Determine if a symbol should be fetched from Deriv."""
+    """Determine if a symbol should be fetched from Deriv.
+
+    USDT-suffixed pairs always go to Bybit regardless of currency
+    keywords (e.g. EURUSDT contains 'EUR' but is a Bybit crypto pair).
+    """
+    if clean_pair.endswith("USDT"):
+        return False
     return any(x in clean_pair for x in DERIV_KEYWORDS)
 
 
@@ -156,7 +165,8 @@ async def fetch_data(pair, interval):
     if is_deriv_pair(raw_pair):
         return await _fetch_deriv(raw_pair, interval)
     else:
-        return await asyncio.to_thread(_fetch_bybit, raw_pair, interval)
+        async with _bybit_semaphore:
+            return await asyncio.to_thread(_fetch_bybit, raw_pair, interval)
 
 
 async def fetch_data_parallel(pairs, interval):
@@ -247,7 +257,8 @@ async def fetch_current_price(pair):
     if is_deriv_pair(raw_pair):
         return await _get_deriv_price(raw_pair)
     else:
-        return await asyncio.to_thread(_get_bybit_price, raw_pair)
+        async with _bybit_semaphore:
+            return await asyncio.to_thread(_get_bybit_price, raw_pair)
 
 
 async def _get_deriv_price(clean_pair):
