@@ -267,7 +267,6 @@ async def _get_deriv_price(clean_pair):
     try:
         res = await _deriv_session.request({
             "ticks": mapped,
-            "subscribe": 0,
         }, timeout=10)
         if "tick" in res:
             return float(res["tick"]["quote"])
