@@ -579,7 +579,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             if symbol in user["pairs"]:
                 skipped.append(f"{symbol} (already added)")
-            elif symbol not in KNOWN_SYMBOLS:
+            elif symbol not in KNOWN_SYMBOLS and not symbol.endswith("USDT"):
                 skipped.append(f"{symbol} (unknown)")
             else:
                 user["pairs"].append(symbol)

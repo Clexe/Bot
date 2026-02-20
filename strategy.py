@@ -6,20 +6,33 @@ from regime import detect_regime, should_skip_regime
 def get_pip_value(pair):
     """Determine pip value multiplier for a given pair.
 
-    Returns a divisor so that risk_pips / pip_value gives a sensible
-    price distance for stop-loss calculations.
+    Returns a multiplier so that (price_diff * pip_value) gives pips.
+    Grouped by typical price magnitude of the asset.
     """
     clean = pair.upper()
-    # Crypto needs special handling per asset price magnitude
+    # Crypto — grouped by price magnitude
     if "BTC" in clean:
-        return 0.1   # 1 pip ≈ $10, 50 pips ≈ $500
-    if "ETH" in clean:
-        return 1      # 1 pip ≈ $1, 50 pips ≈ $50
-    if "SOL" in clean:
-        return 10     # 1 pip ≈ $0.1, 50 pips ≈ $5
+        return 0.1   # price ~$60k-100k  → 1 pip ≈ $10
+    if "ETH" in clean or "BNB" in clean or "MKR" in clean:
+        return 1     # price ~$200-4000  → 1 pip ≈ $1
+    if "SOL" in clean or "AVAX" in clean or "LINK" in clean or "DOT" in clean \
+       or "APT" in clean or "LTC" in clean or "ICP" in clean or "INJ" in clean \
+       or "FIL" in clean or "ATOM" in clean or "AAVE" in clean or "UNI" in clean \
+       or "RNDR" in clean or "FET" in clean or "TON" in clean or "WLD" in clean:
+        return 10    # price ~$5-250    → 1 pip ≈ $0.10
+    if "XRP" in clean or "ADA" in clean or "DOGE" in clean or "MATIC" in clean \
+       or "TRX" in clean or "NEAR" in clean or "SUI" in clean or "OP" in clean \
+       or "ARB" in clean or "SEI" in clean or "JUP" in clean or "WIF" in clean \
+       or "TIA" in clean or "ENA" in clean:
+        return 100   # price ~$0.30-5   → 1 pip ≈ $0.01
+    if "SHIB" in clean or "PEPE" in clean or "BONK" in clean:
+        return 1000000  # price ~$0.00001 → 1 pip ≈ $0.000001
+    # Fallback: any USDT pair not listed above — assume mid-cap ($1-50 range)
+    if clean.endswith("USDT") or clean.endswith("USD"):
+        return 10
     if any(x in clean for x in HIGH_PIP_SYMBOLS):
         return 10
-    return 10000
+    return 10000  # standard forex
 
 
 # =====================
