@@ -694,7 +694,7 @@ def load_sent_signals():
                 signals[r[0]] = {
                     "price": r[1],
                     "direction": r[2],
-                    "time": r[3],
+                    "time": float(r[3]) if r[3] is not None else 0,
                 }
             logger.info("Loaded %d persisted signal states", len(signals))
             return signals
