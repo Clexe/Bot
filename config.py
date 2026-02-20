@@ -56,6 +56,12 @@ VALID_MODES = {"MARKET", "LIMIT"}
 VALID_TIMEFRAMES = {"M5", "M15", "M30", "H1"}
 VALID_HIGHER_TFS = {"H4", "1D", "1W"}
 
+# Currency codes that must NOT be combined with USDT (they are forex, not crypto)
+FOREX_BASES = {
+    "EUR", "GBP", "USD", "JPY", "AUD", "NZD", "CAD", "CHF",
+    "XAU", "XAG",
+}
+
 # =====================
 # SUPPORTED SYMBOLS
 # =====================

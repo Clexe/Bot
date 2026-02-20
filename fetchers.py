@@ -271,6 +271,7 @@ async def _get_deriv_price(clean_pair):
         }, timeout=10)
         if "tick" in res:
             return float(res["tick"]["quote"])
+        logger.warning("Deriv tick response missing 'tick' for %s: %s", clean_pair, res.get("error", res))
         return None
     except Exception as e:
         logger.error("Deriv price fetch error for %s: %s", clean_pair, e)
