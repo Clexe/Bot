@@ -72,6 +72,9 @@ async def is_news_blackout(pair):
     """Check if a pair is within a news blackout window (async)."""
     if not USE_NEWS_FILTER:
         return False
+    # Crypto and synthetics are unaffected by forex news
+    if any(k in pair.upper() for k in ALWAYS_OPEN_KEYS):
+        return False
     await fetch_forex_news()
     currencies = set()
     for code in ("USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"):

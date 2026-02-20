@@ -1,5 +1,5 @@
 import pandas as pd
-from config import HIGH_PIP_SYMBOLS, SKIP_VOLATILE_REGIME
+from config import HIGH_PIP_SYMBOLS, SKIP_VOLATILE_REGIME, ALWAYS_OPEN_KEYS
 from regime import detect_regime, should_skip_regime
 
 
@@ -661,8 +661,9 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
     # --- Regime Detection (pre-filter) ---
     regime_info = detect_regime(df_l)
 
-    if SKIP_VOLATILE_REGIME and regime_info["regime"] == "VOLATILE":
-        return None  # Don't trade chop
+    is_always_open = any(k in pair.upper() for k in ALWAYS_OPEN_KEYS)
+    if SKIP_VOLATILE_REGIME and regime_info["regime"] == "VOLATILE" and not is_always_open:
+        return None  # Don't trade chop (skip for crypto/synthetics — inherently volatile)
 
     # --- Layer 2: H4 Storyline ---
     storyline = detect_storyline(df_h, df_l)
