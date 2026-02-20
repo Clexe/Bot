@@ -197,7 +197,7 @@ async def scanner_loop(app):
                     continue
                 for pair in settings["pairs"]:
                     clean_p = pair.replace("\n", "").replace("\r", "").strip().upper()
-                    if not clean_p or clean_p not in KNOWN_SYMBOLS:
+                    if not clean_p or (clean_p not in KNOWN_SYMBOLS and not clean_p.endswith("USDT")):
                         continue
                     if clean_p not in pair_map:
                         pair_map[clean_p] = []
