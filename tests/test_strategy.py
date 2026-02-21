@@ -227,25 +227,25 @@ class TestDetectFVG:
 # =====================
 class TestCalculateLevels:
     def test_buy_sl_within_risk(self):
-        levels = calculate_levels("BUY", 1.1000, 1.1200, 0.9900, 0.0050, 1.1500)
+        levels = calculate_levels("BUY", 1.1000, 0.9900, 0.0050, 1.1500)
         assert levels["sl"] == pytest.approx(1.1000 - 0.0050)
         assert levels["tp"] == 1.1500
 
     def test_buy_sl_raw_when_small(self):
-        levels = calculate_levels("BUY", 1.1000, 1.1200, 1.0980, 0.0050, 1.1500)
+        levels = calculate_levels("BUY", 1.1000, 1.0980, 0.0050, 1.1500)
         assert levels["sl"] == pytest.approx(1.0980)
 
     def test_buy_sl_capped(self):
-        levels = calculate_levels("BUY", 1.1000, 1.1200, 1.0500, 0.0050, 1.1500)
+        levels = calculate_levels("BUY", 1.1000, 1.0500, 0.0050, 1.1500)
         assert levels["sl"] == pytest.approx(1.1000 - 0.0050)
 
     def test_sell_sl_raw_when_small(self):
-        levels = calculate_levels("SELL", 1.1000, 1.1020, 1.0800, 0.0050, 1.0500)
+        levels = calculate_levels("SELL", 1.1000, 1.1020, 0.0050, 1.0500)
         assert levels["sl"] == pytest.approx(1.1020)
         assert levels["tp"] == 1.0500
 
     def test_sell_sl_capped(self):
-        levels = calculate_levels("SELL", 1.1000, 1.1600, 1.0800, 0.0050, 1.0500)
+        levels = calculate_levels("SELL", 1.1000, 1.1600, 0.0050, 1.0500)
         assert levels["sl"] == pytest.approx(1.1000 + 0.0050)
 
 
@@ -935,38 +935,38 @@ class TestTouchTrade:
 class TestMultiTP:
     def test_buy_tp_ordering(self):
         """BUY: TP1 < TP2 < TP3."""
-        levels = calculate_levels("BUY", 1.10, 1.12, 1.08, 0.03, 1.15, htf_extreme=1.20)
+        levels = calculate_levels("BUY", 1.10, 1.08, 0.03, 1.15, htf_extreme=1.20)
         assert levels["tp1"] < levels["tp2"]
         assert levels["tp2"] <= levels["tp3"]
 
     def test_sell_tp_ordering(self):
         """SELL: TP1 > TP2 > TP3."""
-        levels = calculate_levels("SELL", 1.10, 1.12, 1.08, 0.03, 1.05, htf_extreme=1.00)
+        levels = calculate_levels("SELL", 1.10, 1.12, 0.03, 1.05, htf_extreme=1.00)
         assert levels["tp1"] > levels["tp2"]
         assert levels["tp2"] >= levels["tp3"]
 
     def test_buy_tp1_is_one_to_one(self):
         """BUY TP1 should equal entry + risk distance (1:1 RR)."""
-        levels = calculate_levels("BUY", 1.10, 1.12, 1.08, 0.03, 1.15)
+        levels = calculate_levels("BUY", 1.10, 1.08, 0.03, 1.15)
         sl = levels["sl"]
         risk = abs(1.10 - sl)
         assert abs(levels["tp1"] - (1.10 + risk)) < 1e-10
 
     def test_sell_tp1_is_one_to_one(self):
         """SELL TP1 should equal entry - risk distance (1:1 RR)."""
-        levels = calculate_levels("SELL", 1.10, 1.12, 1.08, 0.03, 1.05)
+        levels = calculate_levels("SELL", 1.10, 1.12, 0.03, 1.05)
         sl = levels["sl"]
         risk = abs(sl - 1.10)
         assert abs(levels["tp1"] - (1.10 - risk)) < 1e-10
 
     def test_tp2_is_zone_target(self):
         """TP2 should be the opposing zone target (or TP1 if target is closer)."""
-        levels = calculate_levels("BUY", 1.10, 1.12, 1.08, 0.03, 1.18)
+        levels = calculate_levels("BUY", 1.10, 1.08, 0.03, 1.18)
         assert levels["tp2"] == 1.18 or levels["tp2"] >= levels["tp1"]
 
     def test_buy_tp3_uses_htf_extreme(self):
         """BUY TP3 should use HTF extreme if it's bigger than 1:3 RR."""
-        levels = calculate_levels("BUY", 1.10, 1.12, 1.08, 0.03, 1.15, htf_extreme=1.50)
+        levels = calculate_levels("BUY", 1.10, 1.08, 0.03, 1.15, htf_extreme=1.50)
         # 1:3 RR would be 1.10 + 0.02*3 = 1.16, HTF extreme 1.50 is higher
         assert levels["tp3"] == 1.50
 
@@ -991,7 +991,7 @@ class TestMultiTP:
 
     def test_no_htf_extreme_uses_rr(self):
         """Without htf_extreme, TP3 should be 1:3 RR."""
-        levels = calculate_levels("BUY", 1.10, 1.12, 1.08, 0.03, 1.15)
+        levels = calculate_levels("BUY", 1.10, 1.08, 0.03, 1.15)
         sl = levels["sl"]
         risk = abs(1.10 - sl)
         expected_tp3 = max(1.10 + risk * 3, levels["tp2"])

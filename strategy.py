@@ -340,17 +340,24 @@ def compute_volume_proxy(df, zone, lookback=5):
     return round(sum(scores) / len(scores), 3) if scores else 0.5
 
 
-def calculate_levels(sig_type, entry, swing_high, swing_low, max_risk_price, tp_target,
-                      htf_extreme=None):
+def calculate_levels(sig_type, entry, sl_anchor, max_risk_price, tp_target,
+                      htf_extreme=None, sl_multiplier=1.0):
     """Calculate entry, SL, and multi-TP levels for a signal.
+
+    Args:
+        sl_anchor: Structural level for SL (zone boundary, sweep wick, or FVG edge).
+        max_risk_price: Maximum allowed risk in price units.
+        sl_multiplier: Combined multiplier (regime + zone quality) for max risk.
 
     TP1 = 1:1 RR (safe target, move SL to breakeven after)
     TP2 = opposing zone target (standard)
     TP3 = HTF extreme or 1:3 RR (runner)
     """
+    effective_max_risk = max_risk_price * sl_multiplier
+
     if sig_type == "BUY":
-        raw_sl = swing_low
-        sl = entry - max_risk_price if (entry - raw_sl) > max_risk_price else raw_sl
+        raw_sl = sl_anchor
+        sl = entry - effective_max_risk if (entry - raw_sl) > effective_max_risk else raw_sl
         risk = abs(entry - sl)
         tp1 = entry + risk          # 1:1
         tp2 = tp_target             # opposing zone
@@ -360,8 +367,8 @@ def calculate_levels(sig_type, entry, swing_high, swing_low, max_risk_price, tp_
         tp2 = max(tp2, tp1)
         tp3 = max(tp3, tp2)
     else:
-        raw_sl = swing_high
-        sl = entry + max_risk_price if (raw_sl - entry) > max_risk_price else raw_sl
+        raw_sl = sl_anchor
+        sl = entry + effective_max_risk if (raw_sl - entry) > effective_max_risk else raw_sl
         risk = abs(sl - entry)
         tp1 = entry - risk          # 1:1
         tp2 = tp_target             # opposing zone
@@ -771,14 +778,32 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         else:
             sl_anchor = zone["bottom"]
 
+        # FVG refinement: bullish FVG bottom is institutional support
+        if fvg == "BULL_FVG" and len(df_l) >= 3:
+            fvg_bottom = df_l.iloc[-3]['high']  # c1.high = bottom of gap
+            if sl_anchor < fvg_bottom < entry_price:
+                sl_anchor = fvg_bottom  # tighten to FVG boundary
+
+        # HTF zone floor: cap SL at HTF demand zone bottom (structure invalidation)
+        htf_zone = storyline.get("htf_zone")
+        if htf_zone and htf_zone["direction"] == "demand":
+            htf_floor = htf_zone["bottom"]
+            if sl_anchor < htf_floor < entry_price:
+                sl_anchor = htf_floor
+
+        # Combined SL multiplier: regime + zone quality
+        sl_mult = regime_info["sl_multiplier"]
+        if zone["miss"]:
+            sl_mult *= 0.85  # strong displacement = tighter SL
+
         htf_extreme = df_h['high'].max()
         limit_levels = calculate_levels(
-            "BUY", entry_price, swing_high, sl_anchor, max_risk_price, tp_target,
-            htf_extreme=htf_extreme,
+            "BUY", entry_price, sl_anchor, max_risk_price, tp_target,
+            htf_extreme=htf_extreme, sl_multiplier=sl_mult,
         )
         market_levels = calculate_levels(
-            "BUY", c['close'], swing_high, sl_anchor, max_risk_price, tp_target,
-            htf_extreme=htf_extreme,
+            "BUY", c['close'], sl_anchor, max_risk_price, tp_target,
+            htf_extreme=htf_extreme, sl_multiplier=sl_mult,
         )
 
         vol_proxy = compute_volume_proxy(df_l, zone)
@@ -860,14 +885,32 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         else:
             sl_anchor = zone["top"]
 
+        # FVG refinement: bearish FVG top is institutional resistance
+        if fvg == "BEAR_FVG" and len(df_l) >= 3:
+            fvg_top = df_l.iloc[-3]['low']  # c1.low = top of gap
+            if sl_anchor > fvg_top > entry_price:
+                sl_anchor = fvg_top  # tighten to FVG boundary
+
+        # HTF zone ceiling: cap SL at HTF supply zone top (structure invalidation)
+        htf_zone = storyline.get("htf_zone")
+        if htf_zone and htf_zone["direction"] == "supply":
+            htf_ceiling = htf_zone["top"]
+            if sl_anchor > htf_ceiling > entry_price:
+                sl_anchor = htf_ceiling
+
+        # Combined SL multiplier: regime + zone quality
+        sl_mult = regime_info["sl_multiplier"]
+        if zone["miss"]:
+            sl_mult *= 0.85  # strong displacement = tighter SL
+
         htf_extreme = df_h['low'].min()
         limit_levels = calculate_levels(
-            "SELL", entry_price, sl_anchor, swing_low, max_risk_price, tp_target,
-            htf_extreme=htf_extreme,
+            "SELL", entry_price, sl_anchor, max_risk_price, tp_target,
+            htf_extreme=htf_extreme, sl_multiplier=sl_mult,
         )
         market_levels = calculate_levels(
-            "SELL", c['close'], sl_anchor, swing_low, max_risk_price, tp_target,
-            htf_extreme=htf_extreme,
+            "SELL", c['close'], sl_anchor, max_risk_price, tp_target,
+            htf_extreme=htf_extreme, sl_multiplier=sl_mult,
         )
 
         vol_proxy = compute_volume_proxy(df_l, zone)
