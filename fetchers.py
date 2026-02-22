@@ -262,15 +262,24 @@ async def fetch_current_price(pair):
 
 
 async def _get_deriv_price(clean_pair):
-    """Get current tick price from Deriv via shared WebSocket session."""
+    """Get current tick price from Deriv via shared WebSocket session.
+
+    Uses ticks_history (one-shot) instead of ticks (subscription) to avoid
+    AlreadySubscribed errors on repeated calls for the same symbol.
+    """
     mapped = DERIV_SYMBOL_MAP.get(clean_pair, clean_pair)
     try:
         res = await _deriv_session.request({
-            "ticks": mapped,
+            "ticks_history": mapped,
+            "adjust_start_time": 1,
+            "count": 1,
+            "end": "latest",
+            "style": "ticks",
         }, timeout=10)
-        if "tick" in res:
-            return float(res["tick"]["quote"])
-        logger.warning("Deriv tick response missing 'tick' for %s: %s", clean_pair, res.get("error", res))
+        if "history" in res and res["history"].get("prices"):
+            return float(res["history"]["prices"][-1])
+        if "error" in res:
+            logger.warning("Deriv price error for %s: %s", clean_pair, res["error"])
         return None
     except Exception as e:
         logger.error("Deriv price fetch error for %s: %s", clean_pair, e)

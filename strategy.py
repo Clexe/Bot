@@ -1,5 +1,5 @@
 import pandas as pd
-from config import HIGH_PIP_SYMBOLS, SKIP_VOLATILE_REGIME, ALWAYS_OPEN_KEYS
+from config import HIGH_PIP_SYMBOLS, SKIP_VOLATILE_REGIME, ALWAYS_OPEN_KEYS, logger
 from regime import detect_regime, should_skip_regime
 
 
@@ -688,12 +688,16 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
     # --- Layer 2: H4 Storyline ---
     storyline = detect_storyline(df_h, df_l)
     if storyline is None:
+        if is_always_open:
+            logger.info("REJECT %s: storyline=None (no HTF structure)", pair)
         return None
     bias = storyline["bias"]
 
     # Swing points + BOS
     swing_high, swing_low = find_swing_points(df_l)
     if swing_high is None:
+        if is_always_open:
+            logger.info("REJECT %s: no swing points found", pair)
         return None
 
     bullish_bos, bearish_bos, bull_sweep, bear_sweep = detect_bos(
@@ -703,8 +707,12 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
     # H4 Gatekeeper: FORBID trading against H4 bias
     # If H4 says BEAR, no BUY signals allowed (and vice versa)
     if bias == "BULL" and not bullish_bos:
+        if is_always_open:
+            logger.info("REJECT %s: bias=BULL but no bullish BOS", pair)
         return None
     if bias == "BEAR" and not bearish_bos:
+        if is_always_open:
+            logger.info("REJECT %s: bias=BEAR but no bearish BOS", pair)
         return None
 
     # FVG (confluence bonus, not hard gate)
@@ -720,14 +728,18 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
     if bias == "BULL":
         # Regime counter-trend check
-        skip, _ = should_skip_regime(regime_info, "BUY", always_open=is_always_open)
+        skip, skip_reason = should_skip_regime(regime_info, "BUY", always_open=is_always_open)
         if skip:
+            if is_always_open:
+                logger.info("REJECT %s BUY: regime skip (%s)", pair, skip_reason)
             return None
 
         # --- Layer 1: Fresh Zone ---
         fresh = get_fresh_zones(df_l, "demand")
         zone = fresh[0] if fresh else None
         if zone is None:
+            if is_always_open:
+                logger.info("REJECT %s BUY: no fresh demand zone", pair)
             return None  # No fresh zone = no trade
 
         entry_price = zone["top"]
@@ -735,6 +747,8 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
         # --- Layer 3: Arrival Physics ---
         if not analyze_arrival(df_l, zone["top"]):
+            if is_always_open:
+                logger.info("REJECT %s BUY: arrival physics failed", pair)
             return None  # Momentum arrival — invalidated
 
         # --- Layer 4: Roadblock RR Check ---
@@ -742,6 +756,8 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         if risk_distance <= 0:
             risk_distance = max_risk_price
         if not check_roadblocks(entry_price, "BUY", all_fresh_ltf, risk_distance):
+            if is_always_open:
+                logger.info("REJECT %s BUY: roadblock RR failed", pair)
             return None  # RR < 1:2 to nearest roadblock — kill trade
 
         # Soft roadblock check (for confidence)
@@ -765,6 +781,9 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             if touch_trade and sweep_detected:
                 is_touch = True  # Touch trade: sweep + zone + compression = go
             else:
+                if is_always_open:
+                    logger.info("REJECT %s BUY: no engulfing (retest=%s, sweep=%s, touch=%s)",
+                                 pair, retest_ok, sweep_detected, touch_trade)
                 return None
 
         fvg_match = fvg == "BULL_FVG"
@@ -832,14 +851,18 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
     if bias == "BEAR":
         # Regime counter-trend check
-        skip, _ = should_skip_regime(regime_info, "SELL", always_open=is_always_open)
+        skip, skip_reason = should_skip_regime(regime_info, "SELL", always_open=is_always_open)
         if skip:
+            if is_always_open:
+                logger.info("REJECT %s SELL: regime skip (%s)", pair, skip_reason)
             return None
 
         # --- Layer 1: Fresh Zone ---
         fresh = get_fresh_zones(df_l, "supply")
         zone = fresh[0] if fresh else None
         if zone is None:
+            if is_always_open:
+                logger.info("REJECT %s SELL: no fresh supply zone", pair)
             return None
 
         entry_price = zone["bottom"]
@@ -847,6 +870,8 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
         # --- Layer 3: Arrival Physics ---
         if not analyze_arrival(df_l, zone["bottom"]):
+            if is_always_open:
+                logger.info("REJECT %s SELL: arrival physics failed", pair)
             return None
 
         # --- Layer 4: Roadblock RR Check ---
@@ -854,6 +879,8 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         if risk_distance <= 0:
             risk_distance = max_risk_price
         if not check_roadblocks(entry_price, "SELL", all_fresh_ltf, risk_distance):
+            if is_always_open:
+                logger.info("REJECT %s SELL: roadblock RR failed", pair)
             return None
 
         roadblock_near = _check_roadblock(all_fresh_ltf, "BEAR", entry_price, tp_target)
@@ -873,6 +900,9 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             if touch_trade and sweep_detected:
                 is_touch = True
             else:
+                if is_always_open:
+                    logger.info("REJECT %s SELL: no engulfing (retest=%s, sweep=%s, touch=%s)",
+                                 pair, retest_ok, sweep_detected, touch_trade)
                 return None
 
         fvg_match = fvg == "BEAR_FVG"
