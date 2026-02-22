@@ -139,20 +139,22 @@ def detect_regime(df, atr_period=14, trend_lookback=20):
     }
 
 
-def should_skip_regime(regime_info, signal_direction):
+def should_skip_regime(regime_info, signal_direction, always_open=False):
     """Decide whether to skip a trade based on regime.
 
     Returns (skip: bool, reason: str).
 
     Rules:
-      - VOLATILE regime: skip all trades (chop = death by a thousand cuts)
+      - VOLATILE regime: skip trades (chop = death by a thousand cuts)
+        Exception: always_open pairs (crypto/synthetics) are inherently
+        volatile, so VOLATILE regime alone should not block them.
       - TRENDING_BULL + SELL signal: skip (counter-trend)
       - TRENDING_BEAR + BUY signal: skip (counter-trend)
       - RANGING: allow (zone trading works well in ranges)
     """
     regime = regime_info.get("regime", "UNKNOWN")
 
-    if regime == "VOLATILE":
+    if regime == "VOLATILE" and not always_open:
         return True, "volatile_chop"
 
     if regime == "TRENDING_BULL" and signal_direction == "SELL":
