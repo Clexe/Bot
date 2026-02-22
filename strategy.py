@@ -720,7 +720,7 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
     if bias == "BULL":
         # Regime counter-trend check
-        skip, _ = should_skip_regime(regime_info, "BUY")
+        skip, _ = should_skip_regime(regime_info, "BUY", always_open=is_always_open)
         if skip:
             return None
 
@@ -832,7 +832,7 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
     if bias == "BEAR":
         # Regime counter-trend check
-        skip, _ = should_skip_regime(regime_info, "SELL")
+        skip, _ = should_skip_regime(regime_info, "SELL", always_open=is_always_open)
         if skip:
             return None
 

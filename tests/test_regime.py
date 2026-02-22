@@ -158,3 +158,18 @@ class TestShouldSkipRegime:
         info = {"regime": "TRENDING_BULL", "trend_strength": 0.3}
         skip, _ = should_skip_regime(info, "SELL")
         assert skip is False
+
+    def test_volatile_allowed_for_always_open(self):
+        """Crypto/synthetic pairs should NOT be blocked by VOLATILE regime."""
+        info = {"regime": "VOLATILE", "trend_strength": 0.1}
+        skip, _ = should_skip_regime(info, "BUY", always_open=True)
+        assert skip is False
+        skip, _ = should_skip_regime(info, "SELL", always_open=True)
+        assert skip is False
+
+    def test_counter_trend_still_blocks_always_open(self):
+        """Counter-trend check should still apply to always_open pairs."""
+        info = {"regime": "TRENDING_BULL", "trend_strength": 0.6}
+        skip, reason = should_skip_regime(info, "SELL", always_open=True)
+        assert skip is True
+        assert reason == "counter_trend"
