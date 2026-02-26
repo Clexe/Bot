@@ -20,6 +20,7 @@ from strategy import get_smc_signal, get_pip_value
 from signals import format_signal_msg, should_send_signal, cleanup_old_signals
 from rate_limiter import rate_limiter
 from drawdown import record_trade_result, set_open_trade_count
+from correlation import check_correlation
 
 # Global scanner state
 LAST_SCAN_TIME = 0
@@ -27,6 +28,10 @@ IS_SCANNING = False
 
 # In-memory sent signals (loaded from DB on startup)
 SENT_SIGNALS = {}
+
+# Break-even buffer: pips added above entry when moving SL to BE
+# Covers spread + slippage so "break-even" doesn't mean guaranteed loss
+BE_BUFFER_PIPS = 2
 
 
 
@@ -99,12 +104,15 @@ async def check_signal_outcomes():
                 tp1 = entry + risk_dist
                 tp3 = entry + risk_dist * 3  # fallback TP3
 
+                # Break-even buffer: entry + buffer pips (covers spread/slippage)
+                be_buffer = BE_BUFFER_PIPS / pip_val if pip_val > 0 else 0
+
                 # Trail stop: adjust SL based on stage
                 effective_sl = sl
                 if tp_stage >= 2:
                     effective_sl = tp1       # trail to TP1 after TP2 hit
                 elif tp_stage >= 1:
-                    effective_sl = entry     # breakeven after TP1 hit
+                    effective_sl = entry + be_buffer  # breakeven + buffer
 
                 current_pips = (price - entry) * pip_val
 
@@ -132,11 +140,14 @@ async def check_signal_outcomes():
                 tp1 = entry - risk_dist
                 tp3 = entry - risk_dist * 3
 
+                # Break-even buffer for SELL: entry - buffer
+                be_buffer = BE_BUFFER_PIPS / pip_val if pip_val > 0 else 0
+
                 effective_sl = sl
                 if tp_stage >= 2:
                     effective_sl = tp1
                 elif tp_stage >= 1:
-                    effective_sl = entry
+                    effective_sl = entry - be_buffer  # breakeven + buffer
 
                 current_pips = (entry - price) * pip_val
 
@@ -220,27 +231,25 @@ async def scanner_loop(app):
                 continue
 
 
-            # Fetch all timeframes needed
-            # Collect unique timeframe combinations
+            # Fetch all timeframes needed — collect from ALL users, not just first
+            # This fixes the race condition where user B's HTF was never fetched
             tf_sets = {}
             for pair in active_pairs:
-                # Get the first user's settings to determine timeframes
-                # (we'll check per-user settings when sending)
-                uid = pair_map[pair][0]
-                user_conf = get_user(users, uid)
-                ltf = user_conf.get("timeframe", DEFAULT_SETTINGS["timeframe"])
-                htf = user_conf.get("higher_tf", DEFAULT_SETTINGS["higher_tf"])
-                if ltf not in tf_sets:
-                    tf_sets[ltf] = []
-                tf_sets[ltf].append(pair)
-                if htf not in tf_sets:
-                    tf_sets[htf] = []
-                tf_sets[htf].append(pair)
+                for uid in pair_map[pair]:
+                    user_conf = get_user(users, uid)
+                    ltf = user_conf.get("timeframe", DEFAULT_SETTINGS["timeframe"])
+                    htf = user_conf.get("higher_tf", DEFAULT_SETTINGS["higher_tf"])
+                    if ltf not in tf_sets:
+                        tf_sets[ltf] = set()
+                    tf_sets[ltf].add(pair)
+                    if htf not in tf_sets:
+                        tf_sets[htf] = set()
+                    tf_sets[htf].add(pair)
 
             # Parallel fetch per timeframe
             all_data = {}
             for tf, tf_pairs in tf_sets.items():
-                unique_pairs = list(set(tf_pairs))
+                unique_pairs = list(tf_pairs)
                 results = await fetch_data_parallel(unique_pairs, tf)
                 for pair, df in results.items():
                     all_data[(pair, tf)] = df
@@ -282,6 +291,21 @@ async def scanner_loop(app):
                     if not sig:
                         continue
 
+                    # Correlation filter: check if adding this position
+                    # would exceed currency exposure limits
+                    open_sigs = get_open_signals()
+                    open_positions = [
+                        {"pair": s["pair"], "direction": s["direction"]}
+                        for s in open_sigs
+                    ]
+                    corr_ok, corr_reason = check_correlation(
+                        pair, sig["act"], open_positions
+                    )
+                    if not corr_ok:
+                        logger.info("BLOCKED %s %s: correlation filter (%s)",
+                                    sig['act'], pair, corr_reason)
+                        continue
+
                     logger.info("Signal %s %s found — sending to %d users in group (%s/%s/tt=%s)",
                                 sig['act'], pair, len(user_list), ltf, htf, tt)
 
@@ -291,7 +315,10 @@ async def scanner_loop(app):
                     skipped_cooldown = 0
 
                     for uid, user_conf in user_list:
-                        signal_key = f"{uid}_{pair}"
+                        # Dedup key includes entry price bucket so different
+                        # zones on the same pair aren't blocked by cooldown
+                        entry_bucket = f"{sig['limit_e']:.2f}"
+                        signal_key = f"{uid}_{pair}_{sig['act']}_{entry_bucket}"
                         cooldown_sec = user_conf['cooldown'] * 60
 
                         if not should_send_signal(SENT_SIGNALS, signal_key, sig, cooldown_sec):

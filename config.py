@@ -220,6 +220,10 @@ LOSS_STREAK_PAUSE_HOURS = 4   # Hours to pause after loss streak
 MAX_OPEN_TRADES = 5            # Max concurrent open trades
 SIGNAL_MAX_AGE_HOURS = 24      # Auto-expire open signals older than this
 AUTO_WIN_PIPS = 100            # Auto-close as WIN once profit reaches this many pips
+                               # WARNING: This is a flat pip value. On XAUUSD (pip=0.1),
+                               # 100 pips = $10. On EURUSD (pip=10000), 100 pips = 0.01.
+                               # Consider making this ATR-relative in a future phase.
+BE_BUFFER_PIPS = 2             # Pips added to break-even SL to cover spread + slippage
 
 # =====================
 # ADAPTIVE POSITION SIZING

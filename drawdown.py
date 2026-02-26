@@ -80,6 +80,16 @@ def record_trade_result(pnl_pips, is_win):
         if d < cutoff:
             del _daily_pnl[d]
 
+    # Cleanup old weekly entries (keep last 4 weeks)
+    current_week_num = datetime.utcnow().isocalendar()[1]
+    for w in list(_weekly_pnl.keys()):
+        try:
+            week_num = int(w.split("-W")[1])
+            if current_week_num - week_num > 4:
+                del _weekly_pnl[w]
+        except (ValueError, IndexError):
+            pass
+
 
 def set_open_trade_count(count):
     """Update the current number of open trades."""
