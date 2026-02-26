@@ -631,7 +631,10 @@ def detect_storyline(df_h, df_l):
     if len(df_h) < 10 or len(df_l) < 23:
         return None
 
-    htf_zones = find_zones(df_h, lookback=40)
+    # Compute HTF ATR for zone width filtering
+    from regime import compute_atr
+    htf_atr = compute_atr(df_h)
+    htf_zones = find_zones(df_h, lookback=40, atr=htf_atr)
     htf_zones = mark_freshness(htf_zones, df_h)
     fresh_htf = [z for z in htf_zones if z["fresh"]]
 
@@ -678,6 +681,43 @@ def detect_storyline(df_h, df_l):
     # Trading without HTF structure = gambling. Return None to block signal.
     # Legacy detect_bias() momentum fallback removed: it bypassed the entire
     # HTF filter and generated signals on pure momentum without zone context.
+
+    # Exception: for crypto/synthetics (always_open pairs), strict wick-rejection
+    # rarely occurs due to trending nature. Allow a structural bias fallback IF:
+    #   1) HTF zones exist (supply OR demand — structure IS present)
+    #   2) LTF BOS is confirmed (directional conviction, not just momentum)
+    # This preserves the "no structure = no trade" rule while adapting to
+    # crypto's tendency to trend through zones rather than reject off them.
+    from config import ALWAYS_OPEN_KEYS
+    is_always_open_ctx = hasattr(detect_storyline, '_pair') and any(
+        k in detect_storyline._pair for k in ALWAYS_OPEN_KEYS)
+
+    # Use LTF BOS to determine bias direction when HTF zones exist but no rejection
+    if fresh_htf:
+        swing_high, swing_low = find_swing_points(df_l)
+        if swing_high is not None:
+            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low)
+
+            if bull_bos and demand_zones:
+                # LTF confirms bullish + HTF demand zones exist = structural bull bias
+                best_demand = max(demand_zones, key=lambda z: z["bar_index"])
+                tp = _opposing_zone_tp(fresh_htf, "BULL", current_price, df_h['high'].max())
+                roadblock = _check_roadblock(fresh_htf, "BULL", current_price, tp)
+                return {
+                    "bias": "BULL", "htf_zone": best_demand, "tp_target": tp,
+                    "confirmed": True, "roadblock_near": roadblock,
+                }
+
+            if bear_bos and supply_zones:
+                # LTF confirms bearish + HTF supply zones exist = structural bear bias
+                best_supply = max(supply_zones, key=lambda z: z["bar_index"])
+                tp = _opposing_zone_tp(fresh_htf, "BEAR", current_price, df_h['low'].min())
+                roadblock = _check_roadblock(fresh_htf, "BEAR", current_price, tp)
+                return {
+                    "bias": "BEAR", "htf_zone": best_supply, "tp_target": tp,
+                    "confirmed": True, "roadblock_near": roadblock,
+                }
+
     return None
 
 
