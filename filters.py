@@ -2,7 +2,7 @@ import time
 import asyncio
 import aiohttp
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
 from config import (
     USE_NEWS_FILTER, NEWS_IMPACT, NEWS_CACHE_TTL, NEWS_BLACKOUT_MINUTES,
     ALWAYS_OPEN_KEYS, logger,
@@ -83,22 +83,31 @@ async def is_news_blackout(pair):
     if "XAU" in pair:
         currencies.add("USD")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     for event in _NEWS_CACHE:
         if event['currency'] in currencies:
-            diff = (event['time'] - now).total_seconds() / 60
+            event_time = event['time']
+            # Ensure timezone-aware comparison
+            if event_time.tzinfo is None:
+                event_time = event_time.replace(tzinfo=timezone.utc)
+            diff = (event_time - now).total_seconds() / 60
             if -NEWS_BLACKOUT_MINUTES <= diff <= NEWS_BLACKOUT_MINUTES:
                 return True
     return False
 
 
 def is_in_session(session_type):
-    """Check if current time is within the specified trading session."""
-    now_hour = datetime.utcnow().hour
+    """Check if current time is within the specified trading session.
+
+    Session boundaries use exclusive end (< not <=) for consistency:
+      London: 07:00-16:00 UTC (opens 1h before official to catch pre-market)
+      NY: 12:00-21:00 UTC (opens 1h before official to catch pre-market)
+    """
+    now_hour = datetime.now(timezone.utc).hour
     if session_type == "LONDON":
-        return 8 <= now_hour <= 16
+        return 7 <= now_hour < 16
     if session_type == "NY":
-        return 13 <= now_hour <= 21
+        return 12 <= now_hour < 21
     return True  # BOTH
 
 
@@ -108,7 +117,7 @@ def is_market_open(pair):
     if any(k in clean for k in ALWAYS_OPEN_KEYS):
         return True
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     weekday = now.weekday()
     hour = now.hour
     # Friday after 21:00 UTC

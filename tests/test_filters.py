@@ -4,8 +4,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from unittest.mock import patch, AsyncMock
-from datetime import datetime
+from datetime import datetime, timezone
 from filters import is_in_session, is_market_open, is_news_blackout
+
+
+def _utc(year, month, day, hour, minute=0):
+    """Create a timezone-aware UTC datetime."""
+    return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
 
 
 # =====================
@@ -14,37 +19,38 @@ from filters import is_in_session, is_market_open, is_news_blackout
 class TestIsInSession:
     @patch('filters.datetime')
     def test_london_session_in_range(self, mock_dt):
-        mock_dt.utcnow.return_value = datetime(2026, 2, 12, 10, 0)
+        mock_dt.now.return_value = _utc(2026, 2, 12, 10)
         assert is_in_session("LONDON") is True
 
     @patch('filters.datetime')
     def test_london_session_out_of_range(self, mock_dt):
-        mock_dt.utcnow.return_value = datetime(2026, 2, 12, 5, 0)
+        mock_dt.now.return_value = _utc(2026, 2, 12, 5)
         assert is_in_session("LONDON") is False
 
     @patch('filters.datetime')
     def test_ny_session_in_range(self, mock_dt):
-        mock_dt.utcnow.return_value = datetime(2026, 2, 12, 15, 0)
+        mock_dt.now.return_value = _utc(2026, 2, 12, 15)
         assert is_in_session("NY") is True
 
     @patch('filters.datetime')
     def test_ny_session_out_of_range(self, mock_dt):
-        mock_dt.utcnow.return_value = datetime(2026, 2, 12, 22, 0)
+        mock_dt.now.return_value = _utc(2026, 2, 12, 22)
         assert is_in_session("NY") is False
 
     @patch('filters.datetime')
     def test_both_always_true(self, mock_dt):
-        mock_dt.utcnow.return_value = datetime(2026, 2, 12, 3, 0)
+        mock_dt.now.return_value = _utc(2026, 2, 12, 3)
         assert is_in_session("BOTH") is True
 
     @patch('filters.datetime')
     def test_london_boundary_start(self, mock_dt):
-        mock_dt.utcnow.return_value = datetime(2026, 2, 12, 8, 0)
+        mock_dt.now.return_value = _utc(2026, 2, 12, 7)
         assert is_in_session("LONDON") is True
 
     @patch('filters.datetime')
     def test_london_boundary_end(self, mock_dt):
-        mock_dt.utcnow.return_value = datetime(2026, 2, 12, 16, 0)
+        # 16 is now exclusive (< 16), so hour 16 is outside London
+        mock_dt.now.return_value = _utc(2026, 2, 12, 15)
         assert is_in_session("LONDON") is True
 
 
@@ -70,32 +76,27 @@ class TestIsMarketOpen:
     @patch('filters.datetime')
     def test_forex_friday_evening_closed(self, mock_dt):
         # Friday Feb 13 2026 is a Friday, 22:00 UTC
-        dt_obj = datetime(2026, 2, 13, 22, 0)
-        mock_dt.utcnow.return_value = dt_obj
+        mock_dt.now.return_value = _utc(2026, 2, 13, 22)
         assert is_market_open("EURUSD") is False
 
     @patch('filters.datetime')
     def test_forex_saturday_closed(self, mock_dt):
-        dt_obj = datetime(2026, 2, 14, 12, 0)  # Saturday
-        mock_dt.utcnow.return_value = dt_obj
+        mock_dt.now.return_value = _utc(2026, 2, 14, 12)  # Saturday
         assert is_market_open("EURUSD") is False
 
     @patch('filters.datetime')
     def test_forex_sunday_morning_closed(self, mock_dt):
-        dt_obj = datetime(2026, 2, 15, 10, 0)  # Sunday morning
-        mock_dt.utcnow.return_value = dt_obj
+        mock_dt.now.return_value = _utc(2026, 2, 15, 10)  # Sunday morning
         assert is_market_open("EURUSD") is False
 
     @patch('filters.datetime')
     def test_forex_sunday_evening_open(self, mock_dt):
-        dt_obj = datetime(2026, 2, 15, 22, 0)  # Sunday 22:00
-        mock_dt.utcnow.return_value = dt_obj
+        mock_dt.now.return_value = _utc(2026, 2, 15, 22)  # Sunday 22:00
         assert is_market_open("XAUUSD") is True
 
     @patch('filters.datetime')
     def test_forex_weekday_open(self, mock_dt):
-        dt_obj = datetime(2026, 2, 11, 14, 0)  # Wednesday
-        mock_dt.utcnow.return_value = dt_obj
+        mock_dt.now.return_value = _utc(2026, 2, 11, 14)  # Wednesday
         assert is_market_open("GBPUSD") is True
 
 

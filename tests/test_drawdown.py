@@ -28,11 +28,12 @@ class TestCheckCircuitBreaker:
         assert allowed is True
         assert mult == 1.0
 
-    def test_max_open_trades(self):
+    def test_max_open_trades_not_blocking(self):
+        """Open trade count is tracked but doesn't block signals (signal bot)."""
         set_open_trade_count(5)
         allowed, reason, _ = check_circuit_breaker()
-        assert allowed is False
-        assert "max_open_trades" in reason
+        # Max open trades check removed — signal bot doesn't block on trade count
+        assert allowed is True
 
     def test_daily_loss_limit(self):
         record_trade_result(-200, False)
