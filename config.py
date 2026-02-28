@@ -201,7 +201,6 @@ PAIR_THROTTLE_SECONDS = 300  # 5 minutes
 
 # Rate limiter settings
 RATE_LIMIT_MESSAGES_PER_SECOND = 25  # Telegram allows ~30, leave margin
-RATE_LIMIT_BURST = 5
 
 # =====================
 # MARKET REGIME SETTINGS
