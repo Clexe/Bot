@@ -14,14 +14,17 @@ def _calc_lot_size(risk_pips, pip_value, balance, risk_pct, size_multiplier=1.0)
     """
     if risk_pips <= 0 or balance <= 0 or risk_pct <= 0:
         return None
+    # pip_per_lot: USD P&L per pip per lot, varies by asset class
     if pip_value >= 10000:
-        pip_per_lot = 10.0    # Standard forex
+        pip_per_lot = 10.0    # Standard forex (EURUSD, GBPUSD)
     elif pip_value >= 100:
-        pip_per_lot = 10.0    # JPY pairs
+        pip_per_lot = 100.0   # Sub-dollar crypto (XRP, ADA, DOGE)
+    elif pip_value >= 10:
+        pip_per_lot = 10.0    # Mid-cap crypto/metals (SOL, LINK, XAU)
     elif pip_value >= 1:
-        pip_per_lot = 10.0    # Metals, indices
+        pip_per_lot = 1.0     # Large-cap crypto (ETH, BNB)
     else:
-        pip_per_lot = 1.0     # Crypto
+        pip_per_lot = 0.1     # BTC (pip_value=0.1)
     risk_amount = balance * risk_pct / 100
     lot = risk_amount / (risk_pips * pip_per_lot)
     lot *= size_multiplier
@@ -134,9 +137,13 @@ def should_send_signal(sent_signals, signal_key, sig, cooldown_sec):
     if not isinstance(last_info, dict):
         return True
 
-    time_elapsed = (current_time - last_info.get('time', 0)) > cooldown_sec
+    time_since_last = current_time - last_info.get('time', 0)
+    time_elapsed = time_since_last > cooldown_sec
     direction_changed = last_info.get('direction') != sig['act']
-    return time_elapsed or direction_changed
+    # Direction flip allowed after half-cooldown (prevents whipsaw in chop)
+    if direction_changed:
+        return time_since_last > (cooldown_sec * 0.5)
+    return time_elapsed
 
 
 def cleanup_old_signals(sent_signals):

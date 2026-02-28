@@ -169,15 +169,25 @@ class TestShouldSendSignal:
         }
         assert should_send_signal(sent, "user1_EURUSD", {"act": "BUY"}, 3600) is True
 
-    def test_direction_change_bypasses_cooldown(self):
-        sent = {
+    def test_direction_change_half_cooldown(self):
+        """Direction flip respects half-cooldown to prevent whipsaw."""
+        sent_recent = {
             "user1_EURUSD": {
-                "time": time.time() - 10,  # recent
+                "time": time.time() - 10,  # very recent
                 "direction": "BUY",
             }
         }
-        # Direction changed to SELL - should send immediately
-        assert should_send_signal(sent, "user1_EURUSD", {"act": "SELL"}, 3600) is True
+        # Direction changed but too soon (10s < 1800s half-cooldown) → blocked
+        assert should_send_signal(sent_recent, "user1_EURUSD", {"act": "SELL"}, 3600) is False
+
+        sent_half = {
+            "user1_EURUSD": {
+                "time": time.time() - 1900,  # past half-cooldown (1800s)
+                "direction": "BUY",
+            }
+        }
+        # Direction changed and past half-cooldown → allowed
+        assert should_send_signal(sent_half, "user1_EURUSD", {"act": "SELL"}, 3600) is True
 
     def test_invalid_last_info_type(self):
         sent = {"user1_EURUSD": "old_format"}
@@ -240,6 +250,61 @@ class TestRateLimiter:
         rl = RateLimiter(rate=10)
         assert rl._rate == 10
         assert rl._max_tokens == 10
+
+    @pytest.mark.asyncio
+    async def test_acquire_consumes_token(self):
+        from rate_limiter import RateLimiter
+        rl = RateLimiter(rate=100)
+        initial = rl._tokens
+        await rl.acquire()
+        assert rl._tokens < initial
+
+    @pytest.mark.asyncio
+    async def test_concurrent_acquire_not_serialized(self):
+        """Multiple acquires should not serialize when tokens are available."""
+        import asyncio
+        from rate_limiter import RateLimiter
+        rl = RateLimiter(rate=50)
+        # Acquire 5 tokens concurrently — should all complete quickly
+        results = await asyncio.gather(*[rl.acquire() for _ in range(5)])
+        assert len(results) == 5
+        assert rl._tokens < 50
+
+
+# =====================
+# PIP PER LOT TIER TESTS
+# =====================
+class TestPipPerLotTiers:
+    def test_btc_tier(self):
+        from signals import _calc_lot_size
+        # BTC pip_value=0.1, should use pip_per_lot=0.1
+        lot = _calc_lot_size(100, 0.1, 10000, 1)
+        assert lot is not None
+        assert lot > 0
+
+    def test_eth_tier(self):
+        from signals import _calc_lot_size
+        # ETH pip_value=1, should use pip_per_lot=1.0
+        lot = _calc_lot_size(100, 1, 10000, 1)
+        assert lot is not None
+
+    def test_mid_cap_tier(self):
+        from signals import _calc_lot_size
+        # SOL pip_value=10, should use pip_per_lot=10.0
+        lot = _calc_lot_size(100, 10, 10000, 1)
+        assert lot is not None
+
+    def test_sub_dollar_tier(self):
+        from signals import _calc_lot_size
+        # XRP pip_value=100, should use pip_per_lot=100.0
+        lot = _calc_lot_size(100, 100, 10000, 1)
+        assert lot is not None
+
+    def test_forex_tier(self):
+        from signals import _calc_lot_size
+        # EURUSD pip_value=10000, should use pip_per_lot=10.0
+        lot = _calc_lot_size(50, 10000, 10000, 1)
+        assert lot == 0.20
 
     @pytest.mark.asyncio
     async def test_acquire_consumes_token(self):

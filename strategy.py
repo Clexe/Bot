@@ -394,10 +394,12 @@ def detect_fvg(df_l, lookback=15, atr=None):
         if c3['low'] > c1['high'] and (c3['low'] - c1['high']) >= min_gap:
             fvg_top = c3['low']
             fvg_bottom = c1['high']
-            # Check mitigation: any subsequent candle's low dipped into the gap?
+            # Check mitigation: any subsequent candle's body closed into the gap?
+            # Institutional theory: only a body close counts as mitigation, not a wick dip
             mitigated = False
             for j in range(i + 1, len(df_l)):
-                if df_l.iloc[j]['low'] <= fvg_top:
+                body_low = min(df_l.iloc[j]['close'], df_l.iloc[j]['open'])
+                if body_low <= fvg_top:
                     mitigated = True
                     break
             if not mitigated:
@@ -410,7 +412,8 @@ def detect_fvg(df_l, lookback=15, atr=None):
             fvg_bottom = c3['high']
             mitigated = False
             for j in range(i + 1, len(df_l)):
-                if df_l.iloc[j]['high'] >= fvg_bottom:
+                body_high = max(df_l.iloc[j]['close'], df_l.iloc[j]['open'])
+                if body_high >= fvg_bottom:
                     mitigated = True
                     break
             if not mitigated:
@@ -631,9 +634,10 @@ def detect_storyline(df_h, df_l):
     if len(df_h) < 10 or len(df_l) < 23:
         return None
 
-    # Compute HTF ATR for zone width filtering
+    # Compute ATR for both timeframes (LTF ATR needed for BOS displacement filter)
     from regime import compute_atr
     htf_atr = compute_atr(df_h)
+    ltf_atr = compute_atr(df_l)
     htf_zones = find_zones(df_h, lookback=40, atr=htf_atr)
     htf_zones = mark_freshness(htf_zones, df_h)
     fresh_htf = [z for z in htf_zones if z["fresh"]]
@@ -652,7 +656,7 @@ def detect_storyline(df_h, df_l):
         swing_high, swing_low = find_swing_points(df_l)
         confirmed = False
         if swing_high is not None:
-            result = detect_bos(df_l, swing_high, swing_low)
+            result = detect_bos(df_l, swing_high, swing_low, atr=ltf_atr)
             bull_bos = result[0]
             confirmed = bool(bull_bos)
         return {
@@ -669,7 +673,7 @@ def detect_storyline(df_h, df_l):
         swing_high, swing_low = find_swing_points(df_l)
         confirmed = False
         if swing_high is not None:
-            result = detect_bos(df_l, swing_high, swing_low)
+            result = detect_bos(df_l, swing_high, swing_low, atr=ltf_atr)
             bear_bos = result[1]
             confirmed = bool(bear_bos)
         return {
@@ -696,7 +700,7 @@ def detect_storyline(df_h, df_l):
     if fresh_htf:
         swing_high, swing_low = find_swing_points(df_l)
         if swing_high is not None:
-            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low)
+            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low, atr=ltf_atr)
 
             if bull_bos and demand_zones:
                 # LTF confirms bullish + HTF demand zones exist = structural bull bias

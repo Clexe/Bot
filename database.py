@@ -28,12 +28,25 @@ def _get_pool():
     return _pool
 
 
+def close_pool():
+    """Close all database connections in the pool. Call on shutdown."""
+    global _pool
+    with _pool_lock:
+        if _pool is not None:
+            _pool.closeall()
+            _pool = None
+            logger.info("Database connection pool closed")
+
+
 @contextmanager
 def get_db_connection():
     pool = _get_pool()
     conn = pool.getconn()
     try:
         yield conn
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         pool.putconn(conn)
 
@@ -60,11 +73,6 @@ def _refresh_user_cache_if_stale():
         _user_cache_ts = time.time()
 
 
-def _invalidate_user_cache_entry(chat_id):
-    """Update a single entry in the cache after a write."""
-    pass  # The write functions below update the cache directly
-
-
 def load_users():
     """Load all active users with their settings (cache-backed)."""
     _refresh_user_cache_if_stale()
@@ -80,10 +88,9 @@ def _load_users_from_db():
     """Raw DB load — only called by cache refresh."""
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT user_id, settings FROM users WHERE is_active = TRUE")
-            rows = cur.fetchall()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_id, settings FROM users WHERE is_active = TRUE")
+                rows = cur.fetchall()
 
         users = {}
         for r in rows:
@@ -104,16 +111,15 @@ def save_user_settings(chat_id, settings):
     global _user_cache_ts
     chat_id = str(chat_id)
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        json_settings = json.dumps(settings)
-        cur.execute("""
-            INSERT INTO users (user_id, settings, is_active)
-            VALUES (%s, %s, TRUE)
-            ON CONFLICT (user_id)
-            DO UPDATE SET settings = %s, is_active = TRUE;
-        """, (chat_id, json_settings, json_settings))
-        conn.commit()
-        cur.close()
+        with conn.cursor() as cur:
+            json_settings = json.dumps(settings)
+            cur.execute("""
+                INSERT INTO users (user_id, settings, is_active)
+                VALUES (%s, %s, TRUE)
+                ON CONFLICT (user_id)
+                DO UPDATE SET settings = %s, is_active = TRUE;
+            """, (chat_id, json_settings, json_settings))
+            conn.commit()
     # Update cache in-place so next read is instant
     with _user_cache_lock:
         _user_cache[chat_id] = {**DEFAULT_SETTINGS, **settings}
@@ -129,10 +135,9 @@ def deactivate_user(chat_id):
     chat_id = str(chat_id)
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("UPDATE users SET is_active = FALSE WHERE user_id = %s", (chat_id,))
-            conn.commit()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET is_active = FALSE WHERE user_id = %s", (chat_id,))
+                conn.commit()
         # Remove from cache
         with _user_cache_lock:
             _user_cache.pop(chat_id, None)
@@ -170,76 +175,75 @@ def init_db():
     """Create all required database tables."""
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    settings JSONB DEFAULT '{}'::jsonb,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            ''')
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS signal_history (
-                    id SERIAL PRIMARY KEY,
-                    pair VARCHAR(20) NOT NULL,
-                    direction VARCHAR(4) NOT NULL,
-                    mode VARCHAR(10) NOT NULL,
-                    entry_price DOUBLE PRECISION NOT NULL,
-                    tp_price DOUBLE PRECISION NOT NULL,
-                    sl_price DOUBLE PRECISION NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    outcome VARCHAR(10) DEFAULT 'OPEN',
-                    close_price DOUBLE PRECISION,
-                    closed_at TIMESTAMP,
-                    pnl_pips DOUBLE PRECISION DEFAULT 0,
-                    tp_stage INTEGER DEFAULT 0
-                );
-            ''')
-            # Add tp_stage column if missing (existing DB migration)
-            cur.execute("""
-                DO $$ BEGIN
-                    ALTER TABLE signal_history ADD COLUMN tp_stage INTEGER DEFAULT 0;
-                EXCEPTION WHEN duplicate_column THEN NULL;
-                END $$;
-            """)
-            # Add zone_type and regime columns for journal intelligence
-            cur.execute("""
-                DO $$ BEGIN
-                    ALTER TABLE signal_history ADD COLUMN zone_type VARCHAR(10) DEFAULT '';
-                EXCEPTION WHEN duplicate_column THEN NULL;
-                END $$;
-            """)
-            cur.execute("""
-                DO $$ BEGIN
-                    ALTER TABLE signal_history ADD COLUMN regime VARCHAR(20) DEFAULT '';
-                EXCEPTION WHEN duplicate_column THEN NULL;
-                END $$;
-            """)
-            cur.execute("""
-                DO $$ BEGIN
-                    ALTER TABLE signal_history ADD COLUMN confidence VARCHAR(10) DEFAULT 'medium';
-                EXCEPTION WHEN duplicate_column THEN NULL;
-                END $$;
-            """)
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS sent_signals (
-                    signal_key VARCHAR(100) PRIMARY KEY,
-                    price DOUBLE PRECISION NOT NULL,
-                    direction VARCHAR(4) NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            ''')
-            cur.execute('''
-                CREATE INDEX IF NOT EXISTS idx_signal_history_pair
-                ON signal_history(pair, created_at DESC);
-            ''')
-            cur.execute('''
-                CREATE INDEX IF NOT EXISTS idx_signal_history_outcome
-                ON signal_history(outcome);
-            ''')
-            conn.commit()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT PRIMARY KEY,
+                        settings JSONB DEFAULT '{}'::jsonb,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                ''')
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS signal_history (
+                        id SERIAL PRIMARY KEY,
+                        pair VARCHAR(20) NOT NULL,
+                        direction VARCHAR(4) NOT NULL,
+                        mode VARCHAR(10) NOT NULL,
+                        entry_price DOUBLE PRECISION NOT NULL,
+                        tp_price DOUBLE PRECISION NOT NULL,
+                        sl_price DOUBLE PRECISION NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        outcome VARCHAR(10) DEFAULT 'OPEN',
+                        close_price DOUBLE PRECISION,
+                        closed_at TIMESTAMP,
+                        pnl_pips DOUBLE PRECISION DEFAULT 0,
+                        tp_stage INTEGER DEFAULT 0
+                    );
+                ''')
+                # Add tp_stage column if missing (existing DB migration)
+                cur.execute("""
+                    DO $$ BEGIN
+                        ALTER TABLE signal_history ADD COLUMN tp_stage INTEGER DEFAULT 0;
+                    EXCEPTION WHEN duplicate_column THEN NULL;
+                    END $$;
+                """)
+                # Add zone_type and regime columns for journal intelligence
+                cur.execute("""
+                    DO $$ BEGIN
+                        ALTER TABLE signal_history ADD COLUMN zone_type VARCHAR(10) DEFAULT '';
+                    EXCEPTION WHEN duplicate_column THEN NULL;
+                    END $$;
+                """)
+                cur.execute("""
+                    DO $$ BEGIN
+                        ALTER TABLE signal_history ADD COLUMN regime VARCHAR(20) DEFAULT '';
+                    EXCEPTION WHEN duplicate_column THEN NULL;
+                    END $$;
+                """)
+                cur.execute("""
+                    DO $$ BEGIN
+                        ALTER TABLE signal_history ADD COLUMN confidence VARCHAR(10) DEFAULT 'medium';
+                    EXCEPTION WHEN duplicate_column THEN NULL;
+                    END $$;
+                """)
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS sent_signals (
+                        signal_key VARCHAR(100) PRIMARY KEY,
+                        price DOUBLE PRECISION NOT NULL,
+                        direction VARCHAR(4) NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                ''')
+                cur.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_signal_history_pair
+                    ON signal_history(pair, created_at DESC);
+                ''')
+                cur.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_signal_history_outcome
+                    ON signal_history(outcome);
+                ''')
+                conn.commit()
         logger.info("Database tables ready")
     except Exception as e:
         logger.error("DB init error: %s", e)
@@ -266,18 +270,17 @@ def record_signal(pair, direction, mode, entry_price, tp_price, sl_price,
         tp_price = float(tp_price)
         sl_price = float(sl_price)
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO signal_history
-                    (pair, direction, mode, entry_price, tp_price, sl_price,
-                     zone_type, regime, confidence)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id;
-            """, (pair, direction, mode, entry_price, tp_price, sl_price,
-                  zone_type, regime, confidence))
-            signal_id = cur.fetchone()[0]
-            conn.commit()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO signal_history
+                        (pair, direction, mode, entry_price, tp_price, sl_price,
+                         zone_type, regime, confidence)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id;
+                """, (pair, direction, mode, entry_price, tp_price, sl_price,
+                      zone_type, regime, confidence))
+                signal_id = cur.fetchone()[0]
+                conn.commit()
             # Invalidate stats/history caches
             _stats_cache_ts = 0
             _history_cache_ts = 0
@@ -292,14 +295,13 @@ def update_signal_outcome(signal_id, outcome, close_price, pnl_pips):
     global _stats_cache_ts, _history_cache_ts
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE signal_history
-                SET outcome = %s, close_price = %s, pnl_pips = %s, closed_at = CURRENT_TIMESTAMP
-                WHERE id = %s;
-            """, (outcome, close_price, pnl_pips, signal_id))
-            conn.commit()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE signal_history
+                    SET outcome = %s, close_price = %s, pnl_pips = %s, closed_at = CURRENT_TIMESTAMP
+                    WHERE id = %s;
+                """, (outcome, close_price, pnl_pips, signal_id))
+                conn.commit()
         # Invalidate stats/history caches
         _stats_cache_ts = 0
         _history_cache_ts = 0
@@ -312,14 +314,16 @@ def update_signal_tp_stage(signal_id, stage):
 
     stage 0 = no TP hit, 1 = TP1 hit (SL→BE), 2 = TP2 hit (SL→TP1).
     """
+    global _stats_cache_ts, _history_cache_ts
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE signal_history SET tp_stage = %s WHERE id = %s;
-            """, (stage, signal_id))
-            conn.commit()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE signal_history SET tp_stage = %s WHERE id = %s;
+                """, (stage, signal_id))
+                conn.commit()
+        _stats_cache_ts = 0
+        _history_cache_ts = 0
     except Exception as e:
         logger.error("Failed to update TP stage for signal %s: %s", signal_id, e)
 
@@ -328,17 +332,16 @@ def get_open_signals():
     """Get all signals that are still OPEN for outcome checking."""
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT id, pair, direction, entry_price, tp_price, sl_price, mode,
-                       COALESCE(tp_stage, 0), created_at
-                FROM signal_history
-                WHERE outcome = 'OPEN'
-                AND created_at > CURRENT_TIMESTAMP - INTERVAL '48 hours'
-                ORDER BY created_at DESC;
-            """)
-            rows = cur.fetchall()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, pair, direction, entry_price, tp_price, sl_price, mode,
+                           COALESCE(tp_stage, 0), created_at
+                    FROM signal_history
+                    WHERE outcome = 'OPEN'
+                    AND created_at > CURRENT_TIMESTAMP - INTERVAL '48 hours'
+                    ORDER BY created_at DESC;
+                """)
+                rows = cur.fetchall()
             return [
                 {
                     "id": r[0], "pair": r[1], "direction": r[2],
@@ -364,17 +367,16 @@ def expire_stale_signals(max_age_hours=24):
     global _stats_cache_ts, _history_cache_ts
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE signal_history
-                SET outcome = 'EXPIRED', closed_at = CURRENT_TIMESTAMP,
-                    pnl_pips = 0
-                WHERE outcome = 'OPEN'
-                AND created_at < CURRENT_TIMESTAMP - INTERVAL '%s hours';
-            """, (max_age_hours,))
-            count = cur.rowcount
-            conn.commit()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE signal_history
+                    SET outcome = 'EXPIRED', closed_at = CURRENT_TIMESTAMP,
+                        pnl_pips = 0
+                    WHERE outcome = 'OPEN'
+                    AND created_at < CURRENT_TIMESTAMP - INTERVAL '%s hours';
+                """, (max_age_hours,))
+                count = cur.rowcount
+                conn.commit()
             if count > 0:
                 _stats_cache_ts = 0
                 _history_cache_ts = 0
@@ -396,33 +398,32 @@ def get_signal_stats(pair=None, days=30):
 
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            if pair:
-                cur.execute("""
-                    SELECT
-                        COUNT(*) as total,
-                        COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
-                        COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
-                        COUNT(*) FILTER (WHERE outcome = 'OPEN') as open_count,
-                        COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips,
-                        COALESCE(AVG(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as avg_pips
-                    FROM signal_history
-                    WHERE pair = %s AND created_at > CURRENT_TIMESTAMP - INTERVAL '%s days';
-                """, (pair, days))
-            else:
-                cur.execute("""
-                    SELECT
-                        COUNT(*) as total,
-                        COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
-                        COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
-                        COUNT(*) FILTER (WHERE outcome = 'OPEN') as open_count,
-                        COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips,
-                        COALESCE(AVG(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as avg_pips
-                    FROM signal_history
-                    WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days';
-                """, (days,))
-            row = cur.fetchone()
-            cur.close()
+            with conn.cursor() as cur:
+                if pair:
+                    cur.execute("""
+                        SELECT
+                            COUNT(*) as total,
+                            COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
+                            COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
+                            COUNT(*) FILTER (WHERE outcome = 'OPEN') as open_count,
+                            COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips,
+                            COALESCE(AVG(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as avg_pips
+                        FROM signal_history
+                        WHERE pair = %s AND created_at > CURRENT_TIMESTAMP - INTERVAL '%s days';
+                    """, (pair, days))
+                else:
+                    cur.execute("""
+                        SELECT
+                            COUNT(*) as total,
+                            COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
+                            COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
+                            COUNT(*) FILTER (WHERE outcome = 'OPEN') as open_count,
+                            COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips,
+                            COALESCE(AVG(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as avg_pips
+                        FROM signal_history
+                        WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days';
+                    """, (days,))
+                row = cur.fetchone()
             if not row:
                 return None
             total = row[0]
@@ -455,20 +456,19 @@ def get_pair_breakdown(days=30):
     """Get win rate and P&L breakdown per pair for analytics dashboard."""
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT pair,
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
-                    COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
-                    COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
-                FROM signal_history
-                WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
-                GROUP BY pair
-                ORDER BY total_pips DESC;
-            """, (days,))
-            rows = cur.fetchall()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT pair,
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
+                        COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
+                        COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
+                    FROM signal_history
+                    WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                    GROUP BY pair
+                    ORDER BY total_pips DESC;
+                """, (days,))
+                rows = cur.fetchall()
             result = []
             for r in rows:
                 closed = r[2] + r[3]
@@ -492,26 +492,25 @@ def get_session_breakdown(days=30):
     """Get performance breakdown by trading session (London/NY/Overlap)."""
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT
-                    CASE
-                        WHEN EXTRACT(HOUR FROM created_at) BETWEEN 8 AND 12 THEN 'London'
-                        WHEN EXTRACT(HOUR FROM created_at) BETWEEN 13 AND 16 THEN 'Overlap'
-                        WHEN EXTRACT(HOUR FROM created_at) BETWEEN 17 AND 21 THEN 'New York'
-                        ELSE 'Off-Hours'
-                    END as session,
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
-                    COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
-                    COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
-                FROM signal_history
-                WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
-                GROUP BY session
-                ORDER BY total DESC;
-            """, (days,))
-            rows = cur.fetchall()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        CASE
+                            WHEN EXTRACT(HOUR FROM created_at) BETWEEN 8 AND 12 THEN 'London'
+                            WHEN EXTRACT(HOUR FROM created_at) BETWEEN 13 AND 16 THEN 'Overlap'
+                            WHEN EXTRACT(HOUR FROM created_at) BETWEEN 17 AND 21 THEN 'New York'
+                            ELSE 'Off-Hours'
+                        END as session,
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
+                        COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
+                        COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
+                    FROM signal_history
+                    WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                    GROUP BY session
+                    ORDER BY total DESC;
+                """, (days,))
+                rows = cur.fetchall()
             result = []
             for r in rows:
                 closed = r[2] + r[3]
@@ -540,16 +539,15 @@ def get_recent_signals(limit=10):
 
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT pair, direction, mode, entry_price, tp_price, sl_price,
-                       outcome, pnl_pips, created_at
-                FROM signal_history
-                ORDER BY created_at DESC
-                LIMIT %s;
-            """, (limit,))
-            rows = cur.fetchall()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT pair, direction, mode, entry_price, tp_price, sl_price,
+                           outcome, pnl_pips, created_at
+                    FROM signal_history
+                    ORDER BY created_at DESC
+                    LIMIT %s;
+                """, (limit,))
+                rows = cur.fetchall()
             result = [
                 {
                     "pair": r[0], "direction": r[1], "mode": r[2],
@@ -576,15 +574,14 @@ def get_pair_consecutive_losses(pair, limit=10):
     """Count consecutive recent losses for a pair (for auto-disable)."""
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT outcome FROM signal_history
-                WHERE pair = %s AND outcome IN ('WIN', 'LOSS')
-                ORDER BY created_at DESC
-                LIMIT %s;
-            """, (pair, limit))
-            rows = cur.fetchall()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT outcome FROM signal_history
+                    WHERE pair = %s AND outcome IN ('WIN', 'LOSS')
+                    ORDER BY created_at DESC
+                    LIMIT %s;
+                """, (pair, limit))
+                rows = cur.fetchall()
             streak = 0
             for r in rows:
                 if r[0] == 'LOSS':
@@ -601,21 +598,20 @@ def get_zone_type_stats(days=30):
     """Get win rate breakdown by zone type for journal intelligence."""
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT zone_type,
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
-                    COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
-                    COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
-                FROM signal_history
-                WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
-                  AND zone_type IS NOT NULL AND zone_type != ''
-                GROUP BY zone_type
-                ORDER BY total DESC;
-            """, (days,))
-            rows = cur.fetchall()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT zone_type,
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
+                        COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
+                        COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
+                    FROM signal_history
+                    WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                      AND zone_type IS NOT NULL AND zone_type != ''
+                    GROUP BY zone_type
+                    ORDER BY total DESC;
+                """, (days,))
+                rows = cur.fetchall()
             result = []
             for r in rows:
                 closed = r[2] + r[3]
@@ -639,21 +635,20 @@ def get_regime_stats(days=30):
     """Get win rate breakdown by market regime."""
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT regime,
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
-                    COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
-                    COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
-                FROM signal_history
-                WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
-                  AND regime IS NOT NULL AND regime != ''
-                GROUP BY regime
-                ORDER BY total DESC;
-            """, (days,))
-            rows = cur.fetchall()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT regime,
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE outcome = 'WIN') as wins,
+                        COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
+                        COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
+                    FROM signal_history
+                    WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                      AND regime IS NOT NULL AND regime != ''
+                    GROUP BY regime
+                    ORDER BY total DESC;
+                """, (days,))
+                rows = cur.fetchall()
             result = []
             for r in rows:
                 closed = r[2] + r[3]
@@ -680,15 +675,14 @@ def load_sent_signals():
     """Load persisted sent signals state from database."""
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT signal_key, price, direction,
-                       EXTRACT(EPOCH FROM created_at)
-                FROM sent_signals
-                WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '4 hours';
-            """)
-            rows = cur.fetchall()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT signal_key, price, direction,
+                           EXTRACT(EPOCH FROM created_at)
+                    FROM sent_signals
+                    WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '4 hours';
+                """)
+                rows = cur.fetchall()
             signals = {}
             for r in rows:
                 signals[r[0]] = {
@@ -708,15 +702,14 @@ def persist_sent_signal(signal_key, price, direction):
     try:
         price = float(price)
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO sent_signals (signal_key, price, direction)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (signal_key)
-                DO UPDATE SET price = %s, direction = %s, created_at = CURRENT_TIMESTAMP;
-            """, (signal_key, price, direction, price, direction))
-            conn.commit()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO sent_signals (signal_key, price, direction)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (signal_key)
+                    DO UPDATE SET price = %s, direction = %s, created_at = CURRENT_TIMESTAMP;
+                """, (signal_key, price, direction, price, direction))
+                conn.commit()
     except Exception as e:
         logger.error("Failed to persist sent signal: %s", e)
 
@@ -725,14 +718,13 @@ def cleanup_old_sent_signals():
     """Remove expired sent signal entries from database."""
     try:
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                DELETE FROM sent_signals
-                WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '4 hours';
-            """)
-            deleted = cur.rowcount
-            conn.commit()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM sent_signals
+                    WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '4 hours';
+                """)
+                deleted = cur.rowcount
+                conn.commit()
             if deleted:
                 logger.info("Cleaned up %d expired sent signal entries", deleted)
     except Exception as e:
