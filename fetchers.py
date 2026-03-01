@@ -140,6 +140,11 @@ class DerivSession:
 _deriv_session = DerivSession(max_concurrent=5)
 
 
+async def shutdown_fetchers():
+    """Shutdown shared exchange sessions cleanly."""
+    await _deriv_session.close()
+
+
 def is_deriv_pair(clean_pair):
     """Determine if a symbol should be fetched from Deriv.
 

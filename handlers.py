@@ -355,6 +355,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: broadcast a message to all users."""
     sender_id = str(update.effective_user.id)
     if sender_id != ADMIN_ID:
+        await update.message.reply_text("Unauthorized. This command is admin-only.")
         return
     if not context.args:
         await update.message.reply_text("Usage: /broadcast <message>")
@@ -383,6 +384,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: show user count and pair stats."""
     sender_id = str(update.effective_user.id)
     if sender_id != ADMIN_ID:
+        await update.message.reply_text("Unauthorized. This command is admin-only.")
         return
     users = await load_users_async()
     active_pairs = sum(len(u.get("pairs", [])) for u in users.values())

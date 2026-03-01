@@ -373,7 +373,7 @@ def expire_stale_signals(max_age_hours=24):
                     SET outcome = 'EXPIRED', closed_at = CURRENT_TIMESTAMP,
                         pnl_pips = 0
                     WHERE outcome = 'OPEN'
-                    AND created_at < CURRENT_TIMESTAMP - INTERVAL '%s hours';
+                    AND created_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 hour');
                 """, (max_age_hours,))
                 count = cur.rowcount
                 conn.commit()
@@ -409,7 +409,7 @@ def get_signal_stats(pair=None, days=30):
                             COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips,
                             COALESCE(AVG(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as avg_pips
                         FROM signal_history
-                        WHERE pair = %s AND created_at > CURRENT_TIMESTAMP - INTERVAL '%s days';
+                        WHERE pair = %s AND created_at > CURRENT_TIMESTAMP - (%s * INTERVAL '1 day');
                     """, (pair, days))
                 else:
                     cur.execute("""
@@ -421,7 +421,7 @@ def get_signal_stats(pair=None, days=30):
                             COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips,
                             COALESCE(AVG(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as avg_pips
                         FROM signal_history
-                        WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days';
+                        WHERE created_at > CURRENT_TIMESTAMP - (%s * INTERVAL '1 day');
                     """, (days,))
                 row = cur.fetchone()
             if not row:
@@ -464,7 +464,7 @@ def get_pair_breakdown(days=30):
                         COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
                         COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
                     FROM signal_history
-                    WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                    WHERE created_at > CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')
                     GROUP BY pair
                     ORDER BY total_pips DESC;
                 """, (days,))
@@ -506,7 +506,7 @@ def get_session_breakdown(days=30):
                         COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
                         COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
                     FROM signal_history
-                    WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                    WHERE created_at > CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')
                     GROUP BY session
                     ORDER BY total DESC;
                 """, (days,))
@@ -606,7 +606,7 @@ def get_zone_type_stats(days=30):
                         COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
                         COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
                     FROM signal_history
-                    WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                    WHERE created_at > CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')
                       AND zone_type IS NOT NULL AND zone_type != ''
                     GROUP BY zone_type
                     ORDER BY total DESC;
@@ -643,7 +643,7 @@ def get_regime_stats(days=30):
                         COUNT(*) FILTER (WHERE outcome = 'LOSS') as losses,
                         COALESCE(SUM(pnl_pips) FILTER (WHERE outcome != 'OPEN'), 0) as total_pips
                     FROM signal_history
-                    WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '%s days'
+                    WHERE created_at > CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')
                       AND regime IS NOT NULL AND regime != ''
                     GROUP BY regime
                     ORDER BY total DESC;

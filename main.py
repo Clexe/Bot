@@ -1,8 +1,9 @@
 import asyncio
 import sys
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
-from config import BOT_TOKEN, DATABASE_URL, logger
+from config import BOT_TOKEN, DATABASE_URL, DERIV_APP_ID, DERIV_TOKEN, ADMIN_ID, logger
 from database import init_db, close_pool
+from fetchers import shutdown_fetchers
 from handlers import (
     start_command, mode_command, settf_command, sethtf_command, setrisk_command,
     setbalance_command, setriskpct_command, touchmode_command,
@@ -26,9 +27,15 @@ def _validate_env():
         missing.append("TELEGRAM_TOKEN")
     if not DATABASE_URL:
         missing.append("DATABASE_URL")
+    if not DERIV_APP_ID:
+        missing.append("DERIV_APP_ID")
+    if not DERIV_TOKEN:
+        missing.append("DERIV_TOKEN")
     if missing:
         logger.critical("Missing required env vars: %s", ", ".join(missing))
         sys.exit(1)
+    if not ADMIN_ID:
+        logger.warning("ADMIN_ID is not set; admin commands will be inaccessible")
 
 
 async def post_init(app: Application):
@@ -58,6 +65,7 @@ async def post_shutdown(app: Application):
             await _scanner_task
         except asyncio.CancelledError:
             pass
+    await shutdown_fetchers()
     close_pool()
     logger.info("Sniper V3 shut down cleanly")
 
