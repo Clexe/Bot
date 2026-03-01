@@ -6,7 +6,7 @@ from pybit.unified_trading import HTTP
 from config import (
     DERIV_TOKEN, DERIV_APP_ID, BYBIT_KEY, BYBIT_SECRET,
     DERIV_SYMBOL_MAP, DERIV_KEYWORDS, DERIV_GRANULARITY, BYBIT_INTERVALS,
-    DERIV_CANDLE_COUNT, logger,
+    BYBIT_CANDLE_LIMITS, DERIV_CANDLE_COUNT, logger,
 )
 
 # Initialize Bybit client with larger connection pool to avoid overflow warnings
@@ -233,7 +233,8 @@ def _fetch_bybit(clean_pair, interval):
     try:
         tf = BYBIT_INTERVALS.get(interval, "15")
         category = _bybit_category(clean_pair)
-        resp = bybit.get_kline(category=category, symbol=clean_pair, interval=tf, limit=100)
+        limit = BYBIT_CANDLE_LIMITS.get(interval, 200)
+        resp = bybit.get_kline(category=category, symbol=clean_pair, interval=tf, limit=limit)
         if not resp or 'result' not in resp or not resp['result'].get('list'):
             logger.warning("Bybit empty response for %s", clean_pair)
             return pd.DataFrame()

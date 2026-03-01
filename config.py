@@ -180,6 +180,19 @@ BYBIT_INTERVALS = {
     "1W": "W",
 }
 
+# Adaptive candle limits for Bybit (API max=1000).
+# Higher TFs need deeper history for zone discovery;
+# lower TFs need less since each candle = less time.
+BYBIT_CANDLE_LIMITS = {
+    "M5": 200,
+    "M15": 200,
+    "M30": 200,
+    "H1": 200,
+    "H4": 200,
+    "1D": 365,
+    "1W": 200,
+}
+
 # =====================
 # SIGNAL & SCANNER SETTINGS
 # =====================
