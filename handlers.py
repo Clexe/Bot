@@ -573,11 +573,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_symbols = text.replace(",", " ").replace("\n", " ").split()
         added = []
         skipped = []
+        MAX_PAIRS = 30  # prevent watchlist abuse
         for raw in raw_symbols:
-            symbol = raw.strip().upper()
+            # Normalize: strip slashes (users paste "BTC/USDT" from other platforms)
+            symbol = raw.strip().upper().replace("/", "")
             if not symbol:
                 continue
-            if symbol in user["pairs"]:
+            # Validate format: alphanumeric, 3-20 chars
+            if not symbol.isalnum() or len(symbol) < 3 or len(symbol) > 20:
+                skipped.append(f"{raw.strip().upper()} (invalid format)")
+                continue
+            if len(user["pairs"]) + len(added) >= MAX_PAIRS:
+                skipped.append(f"{symbol} (max {MAX_PAIRS} pairs reached)")
+                continue
+            if symbol in user["pairs"] or symbol in added:
                 skipped.append(f"{symbol} (already added)")
             elif symbol not in KNOWN_SYMBOLS and not symbol.endswith("USDT"):
                 skipped.append(f"{symbol} (unknown)")

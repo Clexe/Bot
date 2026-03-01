@@ -656,7 +656,10 @@ def detect_storyline(df_h, df_l):
         swing_high, swing_low = find_swing_points(df_l)
         confirmed = False
         if swing_high is not None:
-            result = detect_bos(df_l, swing_high, swing_low, atr=ltf_atr)
+            # Use lenient ATR (0.25x) for bias confirmation — stricter filtering
+            # is applied later in get_smc_signal() for trade entry BOS
+            bias_atr = ltf_atr * 0.5 if ltf_atr else None
+            result = detect_bos(df_l, swing_high, swing_low, atr=bias_atr)
             bull_bos = result[0]
             confirmed = bool(bull_bos)
         return {
@@ -673,7 +676,8 @@ def detect_storyline(df_h, df_l):
         swing_high, swing_low = find_swing_points(df_l)
         confirmed = False
         if swing_high is not None:
-            result = detect_bos(df_l, swing_high, swing_low, atr=ltf_atr)
+            bias_atr = ltf_atr * 0.5 if ltf_atr else None
+            result = detect_bos(df_l, swing_high, swing_low, atr=bias_atr)
             bear_bos = result[1]
             confirmed = bool(bear_bos)
         return {
@@ -692,15 +696,13 @@ def detect_storyline(df_h, df_l):
     #   2) LTF BOS is confirmed (directional conviction, not just momentum)
     # This preserves the "no structure = no trade" rule while adapting to
     # crypto's tendency to trend through zones rather than reject off them.
-    from config import ALWAYS_OPEN_KEYS
-    is_always_open_ctx = hasattr(detect_storyline, '_pair') and any(
-        k in detect_storyline._pair for k in ALWAYS_OPEN_KEYS)
-
     # Use LTF BOS to determine bias direction when HTF zones exist but no rejection
+    # Lenient ATR (0.25x effective) for bias detection — entry BOS is stricter
     if fresh_htf:
         swing_high, swing_low = find_swing_points(df_l)
         if swing_high is not None:
-            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low, atr=ltf_atr)
+            bias_atr = ltf_atr * 0.5 if ltf_atr else None
+            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low, atr=bias_atr)
 
             if bull_bos and demand_zones:
                 # LTF confirms bullish + HTF demand zones exist = structural bull bias

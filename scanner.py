@@ -207,8 +207,12 @@ async def scanner_loop(app):
                 if not is_in_session(settings["session"]):
                     continue
                 for pair in settings["pairs"]:
-                    clean_p = pair.replace("\n", "").replace("\r", "").strip().upper()
-                    if not clean_p or (clean_p not in KNOWN_SYMBOLS and not clean_p.endswith("USDT")):
+                    clean_p = pair.replace("\n", "").replace("\r", "").replace("/", "").strip().upper()
+                    if not clean_p or len(clean_p) < 3 or len(clean_p) > 20:
+                        continue
+                    if not clean_p.isalnum():
+                        continue  # reject symbols with special characters
+                    if clean_p not in KNOWN_SYMBOLS and not clean_p.endswith("USDT"):
                         continue
                     if clean_p.endswith("USDT") and clean_p[:-4] in FOREX_BASES:
                         continue

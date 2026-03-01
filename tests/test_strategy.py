@@ -651,6 +651,45 @@ class TestStoryline:
         ]
         assert _check_roadblock(zones, "BULL", 1.05, 1.15) is False
 
+    def test_bos_fallback_with_high_atr(self):
+        """BOS-confirmed fallback should work even when ATR is large.
+
+        Regression test: Week 1 passed full ltf_atr to detect_bos in storyline,
+        causing all crypto pairs to fail because min_bos_body was too high.
+        Now storyline uses 0.5*ATR (lenient) for bias detection.
+        """
+        # HTF: need 16+ candles for ATR. Create demand zone then trend up.
+        # First: 10 bars of trading range to establish ATR
+        htf_data = []
+        for i in range(10):
+            base = 100.0 + (i % 3) * 2
+            htf_data.append((base, base + 4, base - 4, base + 1))
+        # V-level demand zone: bearish then bullish with a gap (zone width > 0)
+        htf_data.append((104.0, 106.0, 96.0, 97.0))   # bearish, close=97
+        htf_data.append((94.0, 108.0, 93.0, 106.0))    # bullish, open=94 → zone [94,97]
+        # 4 bars trending up ABOVE the zone so it stays fresh
+        for i in range(4):
+            base = 108.0 + i * 3
+            htf_data.append((base, base + 4, base - 1, base + 3))
+        df_h = make_ohlc(htf_data)
+
+        # LTF: 20 flat bars then bullish breakout with moderate body size
+        # LTF ATR from flat bars: range=4, ATR~4. Full threshold=2, lenient=1
+        ltf_base = [(115.0, 117.0, 113.0, 115.0)] * 20
+        # Breakout candles: body of 3 passes lenient (>1) but might fail strict (>2)
+        ltf_base += [
+            (115.0, 118.0, 114.0, 117.5),  # body=2.5
+            (117.5, 121.0, 116.0, 120.0),  # body=2.5, breaks swing high
+            (120.0, 124.0, 119.0, 123.0),  # body=3, confirms breakout
+        ]
+        df_l = make_ohlc(ltf_base)
+
+        result = detect_storyline(df_h, df_l)
+        # Should NOT be None — BOS-confirmed fallback should fire
+        assert result is not None
+        assert result["bias"] == "BULL"
+        assert result["confirmed"] is True
+
 
 # =====================
 # ENGULFING TESTS
