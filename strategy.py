@@ -165,9 +165,12 @@ def mark_freshness(zones, df):
         miss_window = 3
         miss_count = 0
 
-        # Mitigation buffer: 0.1% of zone midpoint
+        # Mitigation buffer: 5% of zone width (floor at 0.02% of price)
+        # Price-based buffer (old: 0.1% of price) was too large for high-price
+        # instruments like BTC ($60 buffer at $60k), killing zones on normal wicks.
         zone_mid = (z["top"] + z["bottom"]) / 2
-        buffer = zone_mid * 0.001
+        zone_width = z["top"] - z["bottom"]
+        buffer = max(zone_width * 0.05, zone_mid * 0.0002)
 
         buffered_top = z["top"] + buffer
         buffered_bottom = z["bottom"] - buffer
@@ -218,8 +221,9 @@ def mark_freshness(zones, df):
         for nz in new_zones:
             start_check = nz["bar_index"] + 1
             miss_count = 0
-            zone_mid = (nz["top"] + nz["bottom"]) / 2
-            buf = zone_mid * 0.001
+            nz_width = nz["top"] - nz["bottom"]
+            nz_mid = (nz["top"] + nz["bottom"]) / 2
+            buf = max(nz_width * 0.05, nz_mid * 0.0002)
             for j in range(start_check, len(df)):
                 candle = df.iloc[j]
                 wick_touches = (candle['low'] <= nz["top"] + buf
@@ -713,6 +717,16 @@ def detect_storyline(df_h, df_l):
                     "bias": "BULL", "htf_zone": best_demand, "tp_target": tp,
                     "confirmed": True, "roadblock_near": roadblock,
                 }
+            elif bull_bos and fresh_htf:
+                # Bull BOS but no demand zones (all broken/flipped to supply in uptrend).
+                # Use nearest fresh zone for structural context — BOS provides direction.
+                best = max(fresh_htf, key=lambda z: z["bar_index"])
+                tp = _opposing_zone_tp(fresh_htf, "BULL", current_price, df_h['high'].max())
+                roadblock = _check_roadblock(fresh_htf, "BULL", current_price, tp)
+                return {
+                    "bias": "BULL", "htf_zone": best, "tp_target": tp,
+                    "confirmed": True, "roadblock_near": roadblock,
+                }
 
             if bear_bos and supply_zones:
                 # LTF confirms bearish + HTF supply zones exist = structural bear bias
@@ -721,6 +735,16 @@ def detect_storyline(df_h, df_l):
                 roadblock = _check_roadblock(fresh_htf, "BEAR", current_price, tp)
                 return {
                     "bias": "BEAR", "htf_zone": best_supply, "tp_target": tp,
+                    "confirmed": True, "roadblock_near": roadblock,
+                }
+            elif bear_bos and fresh_htf:
+                # Bear BOS but no supply zones (all broken/flipped to demand in downtrend).
+                # Use nearest fresh zone for structural context — BOS provides direction.
+                best = max(fresh_htf, key=lambda z: z["bar_index"])
+                tp = _opposing_zone_tp(fresh_htf, "BEAR", current_price, df_h['low'].min())
+                roadblock = _check_roadblock(fresh_htf, "BEAR", current_price, tp)
+                return {
+                    "bias": "BEAR", "htf_zone": best, "tp_target": tp,
                     "confirmed": True, "roadblock_near": roadblock,
                 }
 
