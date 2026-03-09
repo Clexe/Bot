@@ -218,10 +218,10 @@ RATE_LIMIT_MESSAGES_PER_SECOND = 25  # Telegram allows ~30, leave margin
 # =====================
 # SMC DISPLACEMENT & STRUCTURE SETTINGS
 # =====================
-BOS_BODY_RATIO = 0.6              # Min body/range ratio for BOS candle (framework: 0.7, relaxed for crypto)
-BOS_BODY_RELATIVE_MULT = 1.5      # BOS candle body must be >= this * avg body of preceding candles
-DISPLACEMENT_BODY_RATIO = 0.65    # Min body/range ratio for zone displacement candle
-USE_PREMIUM_DISCOUNT_FILTER = True  # Only buy in discount, sell in premium zone
+BOS_BODY_RATIO = 0.4              # Min body/range ratio for BOS candle (0.4 filters dojis, allows normal candles)
+BOS_BODY_RELATIVE_MULT = 0        # Disabled — no SMC precedent, was killing all signals at 1.5
+DISPLACEMENT_BODY_RATIO = 0.5     # Min body/range ratio for zone displacement candle
+USE_PREMIUM_DISCOUNT_FILTER = False  # Disabled until signals are flowing; pd_zone still computed for display
 REQUIRE_INDUCEMENT_SWEEP = False  # When True, require liquidity sweep before entry (hard gate)
 REQUIRE_BOS_FVG = False           # When True, BOS without FVG creation is rejected (hard gate)
 KILL_ZONE_MODE = False            # When True, restrict forex signals to London/NY open kill zones

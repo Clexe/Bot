@@ -44,7 +44,7 @@ def get_pip_value(pair):
 # Gap 1: Body-Based Fresh Zone Detection
 # =====================
 
-def _has_displacement(df, bar_index, direction, atr, min_mult=1.5):
+def _has_displacement(df, bar_index, direction, atr, min_mult=1.0):
     """Check if the candle after zone formation shows institutional displacement.
 
     A valid zone requires price to move aggressively *away* from the zone,
@@ -99,8 +99,8 @@ def find_zones(df, lookback=40, atr=None):
     start = max(0, len(df) - lookback)
     zones = []
 
-    # Minimum zone width: 15% of ATR to filter noise
-    min_width = atr * 0.15 if atr and atr > 0 else 0
+    # Minimum zone width: 5% of ATR to filter noise
+    min_width = atr * 0.05 if atr and atr > 0 else 0
 
     for i in range(start, len(df) - 1):
         c1 = df.iloc[i]
@@ -417,8 +417,8 @@ def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None, classify=Fals
     bull_break_idx = None
     bear_break_idx = None
 
-    # Minimum body size for BOS = 50% of ATR (reject noise breaks)
-    min_bos_body = atr * 0.5 if atr and atr > 0 else 0
+    # Minimum body size for BOS = 25% of ATR (reject noise breaks)
+    min_bos_body = atr * 0.25 if atr and atr > 0 else 0
 
     # Average body of candles preceding the lookback window for relative size check
     pre_start = max(0, len(df_l) - lookback - 15)
@@ -958,7 +958,7 @@ def detect_engulfing(df, zone, lookback=10, atr=None):
     if len(df) < 2:
         return None
 
-    min_body = atr * 0.5 if atr and atr > 0 else 0
+    min_body = atr * 0.2 if atr and atr > 0 else 0
 
     start = max(0, len(df) - lookback)
     for i in range(start + 1, len(df)):
@@ -975,7 +975,7 @@ def detect_engulfing(df, zone, lookback=10, atr=None):
         body_ratio = curr_body / curr_range if curr_range > 0 else 0
 
         # Skip weak candles
-        if curr_body < min_body or body_ratio < 0.55:
+        if curr_body < min_body or body_ratio < 0.4:
             continue
 
         # Bullish engulfing at demand zone
