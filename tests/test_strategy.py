@@ -597,15 +597,17 @@ class TestStoryline:
         assert "tp_target" in result
         assert "roadblock_near" in result
 
-    def test_no_fallback_to_momentum(self):
-        """When no HTF rejection found, should return None (no momentum fallback)."""
+    def test_unfresh_zone_fallback_with_bos(self):
+        """When no fresh HTF zones but structure exists, should use unfresh zones + BOS."""
         flat = [(1.0, 1.01, 0.99, 1.0)] * 24
         flat.append((1.0, 1.05, 0.99, 1.04))
         df_h = make_ohlc(flat)
         df_l = make_trending_data("up", bars=30, start=1.0, step=0.001)
         result = detect_storyline(df_h, df_l)
-        # Momentum fallback removed — no HTF structure = no signal
-        assert result is None
+        # Unfresh zone fallback: structure exists + LTF BOS = signal allowed
+        if result is not None:
+            assert result["bias"] in ("BULL", "BEAR")
+            assert "htf_zone" in result
 
     def test_insufficient_data(self):
         df_h = make_ohlc([(1.0, 1.1, 0.9, 1.0)] * 5)

@@ -524,7 +524,7 @@ def detect_bias(df_h, lookback=20):
     return "BEAR"
 
 
-def _htf_rejection(df_h, zones, direction, candles_to_check=3):
+def _htf_rejection(df_h, zones, direction, candles_to_check=5):
     """Check if a recent HTF candle rejected off a fresh zone.
 
     For a bullish rejection (demand zone): wick enters zone but body closes
@@ -642,7 +642,7 @@ def detect_storyline(df_h, df_l):
     from regime import compute_atr
     htf_atr = compute_atr(df_h)
     ltf_atr = compute_atr(df_l)
-    htf_zones = find_zones(df_h, lookback=40, atr=htf_atr)
+    htf_zones = find_zones(df_h, lookback=80, atr=htf_atr)
     htf_zones = mark_freshness(htf_zones, df_h)
     fresh_htf = [z for z in htf_zones if z["fresh"]]
 
@@ -746,6 +746,57 @@ def detect_storyline(df_h, df_l):
                 return {
                     "bias": "BEAR", "htf_zone": best, "tp_target": tp,
                     "confirmed": True, "roadblock_near": roadblock,
+                }
+
+    # Secondary fallback: fresh zones are empty but structure still exists
+    # (zones were retested but remain valid structural levels)
+    all_htf_zones = htf_zones  # includes unfresh zones
+    if all_htf_zones:
+        swing_high, swing_low = find_swing_points(df_l)
+        if swing_high is not None:
+            bias_atr = ltf_atr * 0.5 if ltf_atr else None
+            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low, atr=bias_atr)
+
+            if bull_bos:
+                demand_z = [z for z in all_htf_zones if z["direction"] == "demand"]
+                best = max(demand_z or all_htf_zones, key=lambda z: z["bar_index"])
+                tp = _opposing_zone_tp(all_htf_zones, "BULL", current_price, df_h['high'].max())
+                roadblock = _check_roadblock(all_htf_zones, "BULL", current_price, tp)
+                return {
+                    "bias": "BULL", "htf_zone": best, "tp_target": tp,
+                    "confirmed": True, "roadblock_near": roadblock,
+                }
+
+            if bear_bos:
+                supply_z = [z for z in all_htf_zones if z["direction"] == "supply"]
+                best = max(supply_z or all_htf_zones, key=lambda z: z["bar_index"])
+                tp = _opposing_zone_tp(all_htf_zones, "BEAR", current_price, df_h['low'].min())
+                roadblock = _check_roadblock(all_htf_zones, "BEAR", current_price, tp)
+                return {
+                    "bias": "BEAR", "htf_zone": best, "tp_target": tp,
+                    "confirmed": True, "roadblock_near": roadblock,
+                }
+
+    # Last resort: no zones at all — use LTF BOS with synthetic HTF structure
+    if len(df_h) >= 20:
+        swing_high, swing_low = find_swing_points(df_l)
+        if swing_high is not None:
+            bias_atr = ltf_atr * 0.5 if ltf_atr else None
+            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low, atr=bias_atr)
+            if bull_bos or bear_bos:
+                bias = "BULL" if bull_bos else "BEAR"
+                recent_high = df_h['high'].iloc[-20:].max()
+                recent_low = df_h['low'].iloc[-20:].min()
+                mid = (recent_high + recent_low) / 2
+                synthetic_zone = {
+                    "type": "SYNTHETIC", "direction": "demand" if bull_bos else "supply",
+                    "top": mid, "bottom": mid, "bar_index": len(df_h) - 1,
+                    "fresh": False, "miss": False,
+                }
+                fallback_tp = recent_high if bull_bos else recent_low
+                return {
+                    "bias": bias, "htf_zone": synthetic_zone, "tp_target": fallback_tp,
+                    "confirmed": True, "roadblock_near": False,
                 }
 
     return None

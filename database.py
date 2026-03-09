@@ -99,6 +99,15 @@ def _load_users_from_db():
             settings = {**DEFAULT_SETTINGS, **saved_settings}
             if not isinstance(settings.get("pairs"), list):
                 settings["pairs"] = list(DEFAULT_SETTINGS["pairs"])
+            # Clean invalid pairs (bare "USDT", single-char bases like "AUSDT")
+            original = list(settings["pairs"])
+            settings["pairs"] = [
+                p for p in settings["pairs"]
+                if not (p.upper().endswith("USDT") and len(p.upper()[:-4]) < 2)
+            ]
+            if len(settings["pairs"]) != len(original):
+                removed = set(original) - set(settings["pairs"])
+                logger.info("Cleaned invalid pairs %s from user %s", removed, uid)
             users[uid] = settings
         return users
     except Exception as e:
