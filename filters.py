@@ -111,6 +111,21 @@ def is_in_session(session_type):
     return True  # BOTH
 
 
+def is_in_kill_zone(pair):
+    """Check if current time is within a high-volume kill zone window.
+
+    Kill zones are the most volatile and liquid periods:
+      London Open: 07:00-09:00 UTC
+      NY Open:     12:00-14:00 UTC
+
+    Crypto and synthetic pairs are always exempt (24/7 markets).
+    """
+    if any(k in pair.upper() for k in ALWAYS_OPEN_KEYS):
+        return True  # Crypto/synthetics always open
+    hour = datetime.now(timezone.utc).hour
+    return hour in (7, 8, 12, 13)  # 07:00-08:59 or 12:00-13:59
+
+
 def is_market_open(pair):
     """Check if the market for a given pair is currently open."""
     clean = pair.upper()

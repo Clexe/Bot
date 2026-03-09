@@ -86,21 +86,31 @@ def format_signal_msg(sig, pair, mode, balance=0, risk_pct=1, pip_value=None,
 
     # Confidence + trigger info
     trigger_parts = []
+    # MSS/BOS badge
+    break_type = sig.get('break_type')
+    if break_type == "MSS":
+        trigger_parts.append("MSS")
+    elif break_type == "BOS":
+        trigger_parts.append("BOS")
     if sig.get('touch'):
         trigger_parts.append("TOUCH")
     if sig.get('sweep'):
         trigger_parts.append("SWEEP")
+    if sig.get('displacement_fvg'):
+        trigger_parts.append("FVG")
     trigger_tag = " | ".join(trigger_parts) if trigger_parts else ""
     trigger_line = f"\n{trigger_tag}" if trigger_tag else ""
 
-    # Regime + volume proxy context line
+    # Regime + volume proxy + premium/discount context line
     regime = sig.get('regime', '')
     vol_proxy = sig.get('volume_proxy', 0)
     vol_label = "HIGH" if vol_proxy >= 0.65 else "MED" if vol_proxy >= 0.4 else "LOW"
+    pd_zone = sig.get('pd_zone', '')
+    pd_tag = f" | {pd_zone.upper()}" if pd_zone and pd_zone != "equilibrium" else ""
     context_line = ""
     if regime:
         regime_short = regime.replace("TRENDING_", "T-").replace("RANGING", "RANGE")
-        context_line = f"\nRegime: {regime_short} | Vol: {vol_label}"
+        context_line = f"\nRegime: {regime_short} | Vol: {vol_label}{pd_tag}"
 
     return (
         f"{emoji} *SMC SIGNAL ({label})* [{confidence.upper()}]\n"

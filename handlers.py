@@ -590,6 +590,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             if symbol in user["pairs"] or symbol in added:
                 skipped.append(f"{symbol} (already added)")
+            elif symbol.endswith("USDT") and len(symbol[:-4]) < 2:
+                skipped.append(f"{symbol} (invalid base)")
             elif symbol not in KNOWN_SYMBOLS and not symbol.endswith("USDT"):
                 skipped.append(f"{symbol} (unknown)")
             elif symbol.endswith("USDT") and symbol[:-4] in FOREX_BASES:
