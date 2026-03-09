@@ -11,7 +11,8 @@ from strategy import (
     find_zones, mark_freshness, get_fresh_zones,
     detect_storyline, detect_engulfing, detect_inducement_swept,
     _opposing_zone_tp, _check_roadblock, check_roadblocks,
-    analyze_arrival,
+    analyze_arrival, classify_swing_sequence, _bos_creates_fvg,
+    is_in_premium_discount, _compute_confidence,
 )
 
 
@@ -154,7 +155,7 @@ class TestDetectBOS:
 
     def test_bearish_bos(self):
         data = [(1.0, 1.05, 0.95, 1.0)] * 20
-        data += [(1.0, 1.02, 0.90, 0.93)] * 5  # body closes below swing low
+        data += [(1.0, 1.01, 0.90, 0.92)] * 5  # body=0.08, range=0.11, ratio=0.73
         df = make_ohlc(data)
         bullish, bearish, bull_sw, bear_sw = detect_bos(df, 1.05, 0.95)
         assert bool(bearish) is True
@@ -1184,3 +1185,224 @@ class TestBosZoneDirectionMismatch:
         assert result is not None
         assert result["bias"] == "BULL"
         assert result["confirmed"] is True
+
+
+# =====================
+# Swing Sequence / Trend Classification
+# =====================
+class TestClassifySwingSequence:
+    def test_uptrend_detection(self):
+        """HH + HL sequence should return UP."""
+        # Explicit zigzag uptrend: low-high-low-high pattern with rising pivots
+        data = [
+            (1.00, 1.02, 0.98, 1.01),  # normal
+            (1.01, 1.03, 1.00, 1.02),  # normal
+            (1.02, 1.08, 1.01, 1.06),  # swing high 1 = 1.08
+            (1.06, 1.07, 1.03, 1.04),  # down
+            (1.04, 1.05, 0.99, 1.00),  # swing low 1 = 0.99
+            (1.00, 1.01, 0.98, 1.01),  # up
+            (1.01, 1.03, 1.00, 1.02),  # normal
+            (1.02, 1.04, 1.01, 1.03),  # normal
+            (1.03, 1.10, 1.02, 1.08),  # swing high 2 = 1.10 (HH)
+            (1.08, 1.09, 1.05, 1.06),  # down
+            (1.06, 1.07, 1.02, 1.03),  # swing low 2 = 1.02 (HL)
+            (1.03, 1.04, 1.01, 1.04),  # up
+            (1.04, 1.06, 1.03, 1.05),  # normal
+            (1.05, 1.12, 1.04, 1.10),  # swing high 3 = 1.12 (HH)
+            (1.10, 1.11, 1.07, 1.08),  # down
+            (1.08, 1.09, 1.05, 1.06),  # swing low 3 = 1.05 (HL)
+            (1.06, 1.07, 1.05, 1.07),  # normal
+        ]
+        df = make_ohlc(data)
+        result = classify_swing_sequence(df, lookback=20)
+        assert result["trend"] == "UP"
+        assert len(result["swing_highs"]) >= 2
+        assert len(result["swing_lows"]) >= 2
+
+    def test_downtrend_detection(self):
+        """LH + LL sequence should return DOWN."""
+        # Explicit 3-bar pivots: each pivot bar's high/low beats BOTH neighbors
+        data = [
+            (1.12, 1.13, 1.11, 1.12),  # 0 normal
+            (1.12, 1.16, 1.11, 1.15),  # 1 SH1=1.16
+            (1.15, 1.14, 1.10, 1.11),  # 2 down (high=1.14 < 1.16)
+            (1.11, 1.12, 1.04, 1.05),  # 3 SL1=1.04 (low=1.04 < both 1.10, 1.06)
+            (1.05, 1.08, 1.06, 1.07),  # 4 up (low=1.06 > 1.04)
+            (1.07, 1.12, 1.06, 1.11),  # 5 SH2=1.12 (high: 1.12 > 1.08, check idx 6)
+            (1.11, 1.10, 1.05, 1.06),  # 6 down (high=1.10 < 1.12)
+            (1.06, 1.07, 0.99, 1.00),  # 7 SL2=0.99 (low=0.99 < both 1.05, 1.01)
+            (1.00, 1.04, 1.01, 1.03),  # 8 up (low=1.01 > 0.99)
+            (1.03, 1.08, 1.02, 1.07),  # 9 SH3=1.08 (high: 1.08 > 1.04, check idx 10)
+            (1.07, 1.06, 1.01, 1.02),  # 10 down (high=1.06 < 1.08)
+            (1.02, 1.03, 0.94, 0.95),  # 11 SL3=0.94 (low: 0.94 < both 1.01, 0.96)
+            (0.95, 0.97, 0.96, 0.96),  # 12 normal (low=0.96 > 0.94)
+        ]
+        df = make_ohlc(data)
+        result = classify_swing_sequence(df, lookback=20)
+        # SH: 1.16, 1.12, 1.08 → descending. SL: 1.04, 0.99, 0.94 → descending
+        assert result["trend"] == "DOWN"
+
+    def test_flat_market_none(self):
+        """Flat market should return NONE."""
+        data = [(1.0, 1.02, 0.98, 1.0)] * 30
+        df = make_ohlc(data)
+        result = classify_swing_sequence(df)
+        assert result["trend"] == "NONE"
+
+    def test_insufficient_data(self):
+        data = [(1.0, 1.1, 0.9, 1.0)] * 3
+        df = make_ohlc(data)
+        result = classify_swing_sequence(df)
+        assert result["trend"] == "NONE"
+
+
+# =====================
+# BOS vs MSS Classification
+# =====================
+class TestBOSvsMSS:
+    def test_classify_false_returns_tuple(self):
+        """Default classify=False returns backward-compatible 4-tuple."""
+        data = [(1.0, 1.05, 0.95, 1.0)] * 20
+        data += [(1.0, 1.08, 0.99, 1.07)] * 5
+        df = make_ohlc(data)
+        result = detect_bos(df, 1.05, 0.95)
+        assert isinstance(result, tuple)
+        assert len(result) == 4
+
+    def test_classify_true_returns_dict(self):
+        """classify=True returns enriched dict."""
+        data = [(1.0, 1.05, 0.95, 1.0)] * 20
+        data += [(1.0, 1.08, 0.99, 1.07)] * 5
+        df = make_ohlc(data)
+        result = detect_bos(df, 1.05, 0.95, classify=True)
+        assert isinstance(result, dict)
+        assert "break_type" in result
+        assert "displacement_fvg" in result
+        assert result["bullish_bos"] is True
+
+    def test_bos_continuation_in_uptrend(self):
+        """Bullish break in uptrend = BOS (continuation)."""
+        # Create uptrend then break above
+        data = []
+        for i in range(20):
+            base = 1.0 + i * 0.01
+            if i % 4 == 0:
+                data.append((base, base + 0.05, base - 0.01, base + 0.03))
+            elif i % 4 == 2:
+                data.append((base, base + 0.01, base - 0.03, base - 0.01))
+            else:
+                data.append((base, base + 0.02, base - 0.02, base + 0.01))
+        # Strong bullish break
+        data += [(1.2, 1.35, 1.19, 1.33)] * 5
+        df = make_ohlc(data)
+        swing_h = df['high'].iloc[:-5].max()
+        swing_l = df['low'].iloc[:-5].min()
+        result = detect_bos(df, swing_h, swing_l, classify=True)
+        if result["bullish_bos"]:
+            assert result["break_type"] == "BOS"
+
+    def test_mss_reversal_in_downtrend(self):
+        """Bullish break in downtrend = MSS (reversal)."""
+        data = []
+        for i in range(20):
+            base = 2.0 - i * 0.01
+            if i % 4 == 0:
+                data.append((base, base + 0.05, base - 0.01, base + 0.03))
+            elif i % 4 == 2:
+                data.append((base, base + 0.01, base - 0.03, base - 0.01))
+            else:
+                data.append((base, base + 0.02, base - 0.02, base + 0.01))
+        # Strong bullish break (reversal)
+        data += [(1.8, 1.95, 1.79, 1.93)] * 5
+        df = make_ohlc(data)
+        swing_h = df['high'].iloc[:-5].max()
+        swing_l = df['low'].iloc[:-5].min()
+        result = detect_bos(df, swing_h, swing_l, classify=True)
+        if result["bullish_bos"]:
+            assert result["break_type"] == "MSS"
+
+
+# =====================
+# BOS FVG Displacement
+# =====================
+class TestBOSCreatedFVG:
+    def test_fvg_present(self):
+        """Candle sequence with gap should return True."""
+        data = [(1.0, 1.02, 0.98, 1.0)] * 20
+        # FVG: c1.high=1.02, then gap candle, then c3.low=1.05 > c1.high
+        data.append((1.0, 1.02, 0.99, 1.01))   # c1
+        data.append((1.02, 1.06, 1.01, 1.05))   # displacement candle
+        data.append((1.05, 1.08, 1.05, 1.07))   # c3 — low=1.05 > c1.high=1.02 → FVG
+        df = make_ohlc(data)
+        # break index = 21 (displacement candle)
+        assert bool(_bos_creates_fvg(df, 21, "BULL", 0.01)) is True
+
+    def test_no_fvg(self):
+        """Candle sequence without gap should return False."""
+        data = [(1.0, 1.02, 0.98, 1.0)] * 20
+        data.append((1.0, 1.02, 0.99, 1.01))
+        data.append((1.01, 1.04, 1.00, 1.03))   # no gap: c3.low=1.00 < c1.high=1.02
+        data.append((1.00, 1.03, 1.00, 1.02))
+        df = make_ohlc(data)
+        assert bool(_bos_creates_fvg(df, 21, "BULL", 0.01)) is False
+
+
+# =====================
+# Premium / Discount
+# =====================
+class TestPremiumDiscount:
+    def test_discount_zone(self):
+        assert is_in_premium_discount(1.02, 1.10, 1.00) == "discount"
+
+    def test_premium_zone(self):
+        assert is_in_premium_discount(1.08, 1.10, 1.00) == "premium"
+
+    def test_equilibrium(self):
+        assert is_in_premium_discount(1.05, 1.10, 1.00) == "equilibrium"
+
+    def test_equal_swing(self):
+        assert is_in_premium_discount(1.0, 1.0, 1.0) == "equilibrium"
+
+    def test_none_swing(self):
+        assert is_in_premium_discount(1.0, None, None) == "equilibrium"
+
+
+# =====================
+# Enhanced Confidence
+# =====================
+class TestEnhancedConfidence:
+    def test_platinum_mss_sweep_engulfing_fvg(self):
+        """MSS + Sweep + Engulfing + FVG = HIGH (platinum)."""
+        zone = {"type": "V", "direction": "demand", "top": 1.0, "bottom": 0.99}
+        result = _compute_confidence(True, 1, zone, True, is_mss=True)
+        assert result == "high"
+
+    def test_bos_fvg_boost(self):
+        """Engulfing + BOS-created FVG = MEDIUM."""
+        zone = {"type": "V", "direction": "demand", "top": 1.0, "bottom": 0.99}
+        result = _compute_confidence(False, 1, zone, False, bos_fvg=True)
+        assert result == "medium"
+
+    def test_gold_unchanged(self):
+        """Sweep + Engulfing still = HIGH."""
+        zone = {"type": "V", "direction": "demand", "top": 1.0, "bottom": 0.99}
+        result = _compute_confidence(True, 1, zone, False)
+        assert result == "high"
+
+
+# =====================
+# Signal New Fields
+# =====================
+class TestSignalNewFields:
+    def test_signal_has_new_fields(self):
+        """Generated signal should include break_type, displacement_fvg, pd_zone."""
+        df_h = make_ohlc([(1.0, 1.1, 0.9, 1.05)] * 15 + [(1.05, 1.15, 0.98, 1.12)] * 10)
+        df_l = make_trending_data("up", bars=30, start=1.0, step=0.005)
+        sig = get_smc_signal(df_l, df_h, "XAUUSD")
+        if sig is not None:
+            assert "break_type" in sig
+            assert "displacement_fvg" in sig
+            assert "pd_zone" in sig
+            assert sig["break_type"] in ("BOS", "MSS", None)
+            assert isinstance(sig["displacement_fvg"], bool)
+            assert sig["pd_zone"] in ("premium", "discount", "equilibrium")

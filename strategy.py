@@ -1,5 +1,10 @@
 import pandas as pd
-from config import HIGH_PIP_SYMBOLS, SKIP_VOLATILE_REGIME, ALWAYS_OPEN_KEYS, logger
+from config import (
+    HIGH_PIP_SYMBOLS, SKIP_VOLATILE_REGIME, ALWAYS_OPEN_KEYS,
+    BOS_BODY_RATIO, BOS_BODY_RELATIVE_MULT, DISPLACEMENT_BODY_RATIO,
+    USE_PREMIUM_DISCOUNT_FILTER, REQUIRE_INDUCEMENT_SWEEP, REQUIRE_BOS_FVG,
+    logger,
+)
 from regime import detect_regime, should_skip_regime
 
 
@@ -61,7 +66,7 @@ def _has_displacement(df, bar_index, direction, atr, min_mult=1.5):
             continue
         body_ratio = body / total_range
 
-        if body >= min_mult * atr and body_ratio >= 0.6:
+        if body >= min_mult * atr and body_ratio >= DISPLACEMENT_BODY_RATIO:
             # Confirm direction: displacement must move AWAY from zone
             is_bullish_candle = c['close'] > c['open']
             if direction == "demand" and is_bullish_candle:
@@ -320,18 +325,87 @@ def find_swing_points(df_l, start=-23, end=-3):
     return segment['high'].max(), segment['low'].min()
 
 
-def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None):
+def classify_swing_sequence(df, lookback=30):
+    """Identify current market structure via swing point sequence.
+
+    Uses 3-bar pivot detection to find swing highs and lows, then checks
+    if the sequence makes HH/HL (uptrend) or LH/LL (downtrend).
+
+    Returns {"trend": "UP"|"DOWN"|"NONE", "swing_highs": [...], "swing_lows": [...]}.
+    """
+    if len(df) < 7:
+        return {"trend": "NONE", "swing_highs": [], "swing_lows": []}
+
+    start = max(0, len(df) - lookback)
+    segment = df.iloc[start:]
+    swing_highs = []
+    swing_lows = []
+
+    # 3-bar pivot: bar whose high/low exceeds both neighbors
+    for i in range(1, len(segment) - 1):
+        c = segment.iloc[i]
+        prev = segment.iloc[i - 1]
+        nxt = segment.iloc[i + 1]
+        if c['high'] > prev['high'] and c['high'] > nxt['high']:
+            swing_highs.append(c['high'])
+        if c['low'] < prev['low'] and c['low'] < nxt['low']:
+            swing_lows.append(c['low'])
+
+    trend = "NONE"
+    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+        hh = swing_highs[-1] > swing_highs[-2]
+        hl = swing_lows[-1] > swing_lows[-2]
+        lh = swing_highs[-1] < swing_highs[-2]
+        ll = swing_lows[-1] < swing_lows[-2]
+        if hh and hl:
+            trend = "UP"
+        elif lh and ll:
+            trend = "DOWN"
+
+    return {"trend": trend, "swing_highs": swing_highs, "swing_lows": swing_lows}
+
+
+def _bos_creates_fvg(df, break_global_idx, direction, atr):
+    """Check if the BOS candle created an FVG (proof of institutional displacement).
+
+    Looks at 3-candle window: [break-1, break, break+1].
+    Returns True if an FVG gap exists in the displacement direction.
+    """
+    if break_global_idx < 1 or break_global_idx + 1 >= len(df):
+        return False
+    min_gap = atr * 0.3 if atr and atr > 0 else 0
+    c1 = df.iloc[break_global_idx - 1]
+    c3 = df.iloc[break_global_idx + 1]
+
+    if direction == "BULL":
+        # Bullish FVG: c3.low > c1.high
+        gap = c3['low'] - c1['high']
+        return gap >= min_gap
+    else:
+        # Bearish FVG: c1.low > c3.high
+        gap = c1['low'] - c3['high']
+        return gap >= min_gap
+
+
+def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None, classify=False):
     """Detect Break of Structure with displacement validation.
 
-    Returns (bullish_bos, bearish_bos, bull_sweep, bear_sweep).
+    When classify=False (default): returns (bullish_bos, bearish_bos, bull_sweep, bear_sweep).
+    When classify=True: returns enriched dict with break_type (BOS vs MSS) and displacement_fvg.
+
     - bullish_bos/bearish_bos: True if a candle *body* (close) broke the level
-      AND the breaking candle shows displacement (body > 0.5*ATR, body_ratio > 0.5).
+      AND the breaking candle shows displacement (body > BOS_BODY_RATIO, body >= 1.5x avg).
     - bull_sweep/bear_sweep: True if only a wick exceeded the level but body
       closed back inside — indicates a liquidity grab, not a real breakout.
-
-    Lookback widened to 10 (from 5) to bridge the gap with swing detection window.
     """
     if len(df_l) < lookback:
+        if classify:
+            return {
+                "bullish_bos": False, "bearish_bos": False,
+                "bull_sweep": False, "bear_sweep": False,
+                "break_type": None, "break_direction": None,
+                "displacement_fvg": False,
+            }
         return False, False, False, False
 
     segment = df_l.iloc[-lookback:]
@@ -340,9 +414,22 @@ def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None):
     bearish_bos = False
     bull_sweep = False
     bear_sweep = False
+    bull_break_idx = None
+    bear_break_idx = None
 
     # Minimum body size for BOS = 50% of ATR (reject noise breaks)
     min_bos_body = atr * 0.5 if atr and atr > 0 else 0
+
+    # Average body of candles preceding the lookback window for relative size check
+    pre_start = max(0, len(df_l) - lookback - 15)
+    pre_end = max(0, len(df_l) - lookback)
+    if pre_end > pre_start:
+        pre_bodies = df_l.iloc[pre_start:pre_end].apply(
+            lambda r: abs(r['close'] - r['open']), axis=1
+        )
+        avg_body = pre_bodies.mean() if len(pre_bodies) > 0 else 0
+    else:
+        avg_body = 0
 
     for idx in range(len(segment)):
         c = segment.iloc[idx]
@@ -351,12 +438,18 @@ def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None):
         body_ratio = body / total_range if total_range > 0 else 0
 
         # Bullish BOS: close above swing high with displacement
-        if c['close'] > swing_high and body >= min_bos_body and body_ratio >= 0.5:
+        if (c['close'] > swing_high and body >= min_bos_body
+                and body_ratio >= BOS_BODY_RATIO
+                and (avg_body <= 0 or body >= avg_body * BOS_BODY_RELATIVE_MULT)):
             bullish_bos = True
+            bull_break_idx = len(df_l) - lookback + idx  # global index
 
         # Bearish BOS: close below swing low with displacement
-        if c['close'] < swing_low and body >= min_bos_body and body_ratio >= 0.5:
+        if (c['close'] < swing_low and body >= min_bos_body
+                and body_ratio >= BOS_BODY_RATIO
+                and (avg_body <= 0 or body >= avg_body * BOS_BODY_RELATIVE_MULT)):
             bearish_bos = True
+            bear_break_idx = len(df_l) - lookback + idx
 
         # Wick sweeps (regardless of body size)
         if c['high'] > swing_high and c['close'] <= swing_high:
@@ -370,7 +463,28 @@ def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None):
     if bearish_bos:
         bear_sweep = False
 
-    return bullish_bos, bearish_bos, bull_sweep, bear_sweep
+    if not classify:
+        return bullish_bos, bearish_bos, bull_sweep, bear_sweep
+
+    # Enriched classification: BOS vs MSS + FVG displacement proof
+    trend_info = classify_swing_sequence(df_l)
+    trend = trend_info["trend"]
+    is_mss = (bullish_bos and trend == "DOWN") or (bearish_bos and trend == "UP")
+
+    # Check if BOS created an FVG (displacement proof)
+    disp_fvg = False
+    if bullish_bos and bull_break_idx is not None:
+        disp_fvg = _bos_creates_fvg(df_l, bull_break_idx, "BULL", atr)
+    elif bearish_bos and bear_break_idx is not None:
+        disp_fvg = _bos_creates_fvg(df_l, bear_break_idx, "BEAR", atr)
+
+    return {
+        "bullish_bos": bullish_bos, "bearish_bos": bearish_bos,
+        "bull_sweep": bull_sweep, "bear_sweep": bear_sweep,
+        "break_type": "MSS" if is_mss else ("BOS" if (bullish_bos or bearish_bos) else None),
+        "break_direction": "BULL" if bullish_bos else ("BEAR" if bearish_bos else None),
+        "displacement_fvg": disp_fvg,
+    }
 
 
 def detect_fvg(df_l, lookback=15, atr=None):
@@ -471,15 +585,16 @@ def compute_volume_proxy(df, zone, lookback=5):
 
 
 def calculate_levels(sig_type, entry, sl_anchor, max_risk_price, tp_target,
-                      htf_extreme=None, sl_multiplier=1.0):
+                      htf_extreme=None, sl_multiplier=1.0, opposing_ltf_zones=None):
     """Calculate entry, SL, and multi-TP levels for a signal.
 
     Args:
         sl_anchor: Structural level for SL (zone boundary, sweep wick, or FVG edge).
         max_risk_price: Maximum allowed risk in price units.
         sl_multiplier: Combined multiplier (regime + zone quality) for max risk.
+        opposing_ltf_zones: List of fresh LTF zones for structural TP1 placement.
 
-    TP1 = 1:1 RR (safe target, move SL to breakeven after)
+    TP1 = first structural obstacle or 1:1 RR (whichever is closer, min 1:1)
     TP2 = opposing zone target (standard)
     TP3 = HTF extreme or 1:3 RR (runner)
     """
@@ -489,10 +604,22 @@ def calculate_levels(sig_type, entry, sl_anchor, max_risk_price, tp_target,
         raw_sl = sl_anchor
         sl = entry - effective_max_risk if (entry - raw_sl) > effective_max_risk else raw_sl
         risk = abs(entry - sl)
-        tp1 = entry + risk          # 1:1
+        tp1 = entry + risk          # 1:1 default
         tp2 = tp_target             # opposing zone
         tp3_rr = entry + risk * 3   # 1:3
         tp3 = max(tp3_rr, htf_extreme) if htf_extreme and htf_extreme > entry else tp3_rr
+
+        # Structural TP1: nearest opposing zone between entry and 1:1
+        if opposing_ltf_zones:
+            supply_above = [z for z in opposing_ltf_zones
+                           if z["direction"] == "supply" and z["bottom"] > entry]
+            if supply_above:
+                nearest = min(supply_above, key=lambda z: z["bottom"])
+                structural_tp1 = nearest["bottom"]
+                # Use if closer than 1:1 but at least 0.8:1 RR
+                if entry + risk * 0.8 <= structural_tp1 < tp1:
+                    tp1 = structural_tp1
+
         # Ensure TP ordering: TP1 < TP2 < TP3
         tp2 = max(tp2, tp1)
         tp3 = max(tp3, tp2)
@@ -500,10 +627,21 @@ def calculate_levels(sig_type, entry, sl_anchor, max_risk_price, tp_target,
         raw_sl = sl_anchor
         sl = entry + effective_max_risk if (raw_sl - entry) > effective_max_risk else raw_sl
         risk = abs(sl - entry)
-        tp1 = entry - risk          # 1:1
+        tp1 = entry - risk          # 1:1 default
         tp2 = tp_target             # opposing zone
         tp3_rr = entry - risk * 3   # 1:3
         tp3 = min(tp3_rr, htf_extreme) if htf_extreme and htf_extreme < entry else tp3_rr
+
+        # Structural TP1: nearest opposing zone between entry and 1:1
+        if opposing_ltf_zones:
+            demand_below = [z for z in opposing_ltf_zones
+                           if z["direction"] == "demand" and z["top"] < entry]
+            if demand_below:
+                nearest = max(demand_below, key=lambda z: z["top"])
+                structural_tp1 = nearest["top"]
+                if tp1 < structural_tp1 <= entry - risk * 0.8:
+                    tp1 = structural_tp1
+
         # Ensure TP ordering: TP1 > TP2 > TP3
         tp2 = min(tp2, tp1)
         tp3 = min(tp3, tp2)
@@ -890,19 +1028,49 @@ def detect_inducement_swept(df, swing_high, swing_low, direction, lookback=15):
 
 
 # =====================
+# Premium / Discount Zone Filter
+# =====================
+
+def is_in_premium_discount(price, swing_high, swing_low):
+    """Classify price position within the current swing range.
+
+    Premium = above 55% of range (sell zone)
+    Discount = below 45% of range (buy zone)
+    Equilibrium = 45-55% band around midpoint
+
+    Returns 'premium', 'discount', or 'equilibrium'.
+    """
+    if swing_high is None or swing_low is None or swing_high == swing_low:
+        return "equilibrium"
+    ratio = (price - swing_low) / (swing_high - swing_low)
+    if ratio > 0.55:
+        return "premium"
+    elif ratio < 0.45:
+        return "discount"
+    return "equilibrium"
+
+
+# =====================
 # Signal Generation — MSNR Sniper Protocol
 # =====================
 
-def _compute_confidence(sweep_detected, engulfing, zone, fvg_match, touch_entry=False):
+def _compute_confidence(sweep_detected, engulfing, zone, fvg_match,
+                        touch_entry=False, is_mss=False, bos_fvg=False):
     """Compute confidence tier based on trigger quality.
 
+    Platinum: MSS + Sweep + Engulfing + FVG match → HIGH (strongest reversal)
     Gold Tier:  Inducement Sweep + Engulfing → HIGH
+    Silver+:    Engulfing + BOS-created FVG → MEDIUM (displacement proof)
     Silver Tier: Engulfing Only → MEDIUM
     Touch Tier:  Sweep + Zone + Compression (no engulfing) → MEDIUM (touch)
     Otherwise:   LOW (should typically be filtered out by layers above)
     """
+    if is_mss and sweep_detected and engulfing and fvg_match:
+        return "high"  # Platinum: reversal at POI with full confirmation
     if sweep_detected and engulfing:
         return "high"
+    if engulfing and bos_fvg:
+        return "medium"
     if engulfing:
         return "medium"
     if touch_entry and sweep_detected:
@@ -949,19 +1117,30 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         return None
     bias = storyline["bias"]
 
-    # Swing points + BOS
+    # Swing points + BOS (enriched with MSS classification + FVG displacement)
     swing_high, swing_low = find_swing_points(df_l)
     if swing_high is None:
         if is_always_open:
             logger.info("REJECT %s: no swing points found", pair)
         return None
 
-    bullish_bos, bearish_bos, bull_sweep, bear_sweep = detect_bos(
-        df_l, swing_high, swing_low, atr=atr
-    )
+    bos_info = detect_bos(df_l, swing_high, swing_low, atr=atr, classify=True)
+    bullish_bos = bos_info["bullish_bos"]
+    bearish_bos = bos_info["bearish_bos"]
+    bull_sweep = bos_info["bull_sweep"]
+    bear_sweep = bos_info["bear_sweep"]
+    break_type = bos_info["break_type"]      # "BOS", "MSS", or None
+    is_mss = break_type == "MSS"
+    bos_fvg = bos_info["displacement_fvg"]   # True if BOS created FVG
+
+    # BOS FVG hard gate (optional, off by default)
+    if REQUIRE_BOS_FVG and (bullish_bos or bearish_bos) and not bos_fvg:
+        if is_always_open:
+            logger.info("REJECT %s: BOS without FVG displacement", pair)
+        return None
 
     # H4 Gatekeeper: FORBID trading against H4 bias
-    # If H4 says BEAR, no BUY signals allowed (and vice versa)
+    # MSS aligned with HTF bias is a valid reversal setup and passes through
     if bias == "BULL" and not bullish_bos:
         if is_always_open:
             logger.info("REJECT %s: bias=BULL but no bullish BOS", pair)
@@ -1001,6 +1180,16 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         entry_price = zone["top"]
         tp_target = storyline_tp if storyline_tp else df_h['high'].max()
 
+        # --- Premium/Discount Filter ---
+        if USE_PREMIUM_DISCOUNT_FILTER:
+            pd_zone = is_in_premium_discount(entry_price, swing_high, swing_low)
+            if pd_zone == "premium":
+                if is_always_open:
+                    logger.info("REJECT %s BUY: entry in premium zone", pair)
+                return None  # Don't buy at premium
+        else:
+            pd_zone = is_in_premium_discount(entry_price, swing_high, swing_low)
+
         # --- Layer 3: Arrival Physics (direction-aware) ---
         if not analyze_arrival(df_l, zone["top"], "demand"):
             if is_always_open:
@@ -1031,6 +1220,12 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         induce = detect_inducement_swept(df_l, swing_high, swing_low, "BUY")
         sweep_detected = induce["swept"]
 
+        # Inducement hard gate (optional, off by default)
+        if REQUIRE_INDUCEMENT_SWEEP and not sweep_detected:
+            if is_always_open:
+                logger.info("REJECT %s BUY: no inducement sweep (hard gate)", pair)
+            return None
+
         # Layer 5 gate: engulfing required, OR touch trade (sweep bypasses engulfing)
         is_touch = False
         if not engulfing:
@@ -1044,7 +1239,8 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
         fvg_match = (fvg is not None and fvg.get("type") == "BULL_FVG")
         confidence = _compute_confidence(
-            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch
+            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch,
+            is_mss=is_mss, bos_fvg=bos_fvg,
         )
 
         # Volume proxy as confidence gate (not just display)
@@ -1085,13 +1281,26 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             sl_mult *= 0.85  # strong displacement = tighter SL
 
         htf_extreme = df_h['high'].max()
+        # FVG magnetic TP: snap TP to nearby unfilled HTF FVG if within range
+        htf_atr_val = atr  # use LTF ATR as proxy
+        htf_fvg = detect_fvg(df_h, lookback=30, atr=htf_atr_val)
+        if htf_fvg and htf_fvg["type"] == "BEAR_FVG":
+            fvg_start = htf_fvg["bottom"]
+            if entry_price < fvg_start and tp_target > 0:
+                dist_to_tp = abs(tp_target - entry_price)
+                dist_to_fvg = abs(fvg_start - tp_target)
+                if dist_to_tp > 0 and dist_to_fvg / dist_to_tp < 0.2:
+                    tp_target = fvg_start  # Snap to FVG boundary
+
         limit_levels = calculate_levels(
             "BUY", entry_price, sl_anchor, max_risk_price, tp_target,
             htf_extreme=htf_extreme, sl_multiplier=sl_mult,
+            opposing_ltf_zones=all_fresh_ltf,
         )
         market_levels = calculate_levels(
             "BUY", c['close'], sl_anchor, max_risk_price, tp_target,
             htf_extreme=htf_extreme, sl_multiplier=sl_mult,
+            opposing_ltf_zones=all_fresh_ltf,
         )
 
         return {
@@ -1114,6 +1323,9 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             "atr": regime_info["atr"],
             "sl_multiplier": regime_info["sl_multiplier"],
             "volume_proxy": vol_proxy,
+            "break_type": break_type,
+            "displacement_fvg": bos_fvg,
+            "pd_zone": pd_zone,
         }
 
     if bias == "BEAR":
@@ -1134,6 +1346,16 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
         entry_price = zone["bottom"]
         tp_target = storyline_tp if storyline_tp else df_h['low'].min()
+
+        # --- Premium/Discount Filter ---
+        if USE_PREMIUM_DISCOUNT_FILTER:
+            pd_zone = is_in_premium_discount(entry_price, swing_high, swing_low)
+            if pd_zone == "discount":
+                if is_always_open:
+                    logger.info("REJECT %s SELL: entry in discount zone", pair)
+                return None  # Don't sell at discount
+        else:
+            pd_zone = is_in_premium_discount(entry_price, swing_high, swing_low)
 
         # --- Layer 3: Arrival Physics (direction-aware) ---
         if not analyze_arrival(df_l, zone["bottom"], "supply"):
@@ -1161,6 +1383,12 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         induce = detect_inducement_swept(df_l, swing_high, swing_low, "SELL")
         sweep_detected = induce["swept"]
 
+        # Inducement hard gate (optional, off by default)
+        if REQUIRE_INDUCEMENT_SWEEP and not sweep_detected:
+            if is_always_open:
+                logger.info("REJECT %s SELL: no inducement sweep (hard gate)", pair)
+            return None
+
         # Layer 5 gate: engulfing required, OR touch trade (sweep bypasses engulfing)
         is_touch = False
         if not engulfing:
@@ -1174,7 +1402,8 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
         fvg_match = (fvg is not None and fvg.get("type") == "BEAR_FVG")
         confidence = _compute_confidence(
-            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch
+            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch,
+            is_mss=is_mss, bos_fvg=bos_fvg,
         )
 
         # Volume proxy as confidence gate (not just display)
@@ -1214,13 +1443,25 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             sl_mult *= 0.85  # strong displacement = tighter SL
 
         htf_extreme = df_h['low'].min()
+        # FVG magnetic TP: snap TP to nearby unfilled HTF FVG if within range
+        htf_fvg = detect_fvg(df_h, lookback=30, atr=atr)
+        if htf_fvg and htf_fvg["type"] == "BULL_FVG":
+            fvg_start = htf_fvg["top"]
+            if entry_price > fvg_start and tp_target > 0:
+                dist_to_tp = abs(entry_price - tp_target)
+                dist_to_fvg = abs(tp_target - fvg_start)
+                if dist_to_tp > 0 and dist_to_fvg / dist_to_tp < 0.2:
+                    tp_target = fvg_start  # Snap to FVG boundary
+
         limit_levels = calculate_levels(
             "SELL", entry_price, sl_anchor, max_risk_price, tp_target,
             htf_extreme=htf_extreme, sl_multiplier=sl_mult,
+            opposing_ltf_zones=all_fresh_ltf,
         )
         market_levels = calculate_levels(
             "SELL", c['close'], sl_anchor, max_risk_price, tp_target,
             htf_extreme=htf_extreme, sl_multiplier=sl_mult,
+            opposing_ltf_zones=all_fresh_ltf,
         )
 
         return {
@@ -1243,6 +1484,9 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             "atr": regime_info["atr"],
             "sl_multiplier": regime_info["sl_multiplier"],
             "volume_proxy": vol_proxy,
+            "break_type": break_type,
+            "displacement_fvg": bos_fvg,
+            "pd_zone": pd_zone,
         }
 
     return None
