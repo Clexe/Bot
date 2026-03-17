@@ -335,6 +335,7 @@ class TestFreshness:
             (1.00, 1.03, 0.99, 1.025),  # bullish
             (1.02, 1.03, 0.98, 0.99),   # bearish → A-level zone at (1.02, 1.025)
             (0.98, 1.021, 0.97, 0.98),  # high=1.021 enters zone [1.02, 1.025]
+            (0.97, 0.98, 0.96, 0.975),  # extra candle (current) — freshness excludes this
         ]
         df = make_ohlc(data)
         zones = find_zones(df, lookback=40)
@@ -370,6 +371,7 @@ class TestFreshness:
             (0.90, 0.91, 0.89, 0.905),
             (0.89, 0.90, 0.88, 0.895),
             (0.88, 0.89, 0.87, 0.885),
+            (0.87, 0.88, 0.86, 0.875),  # extra candle (current)
         ]
         df = make_ohlc(data)
         zones = find_zones(df, lookback=40)
@@ -387,6 +389,8 @@ class TestFreshness:
         data = [
             (1.00, 1.03, 0.99, 1.025),  # bullish
             (1.02, 1.03, 0.98, 0.99),   # bearish → A-level zone
+            (0.98, 1.020, 0.97, 0.98),  # high=1.020 enters buffered zone bottom
+            (0.97, 0.98, 0.96, 0.975),  # extra candle (current)
             (0.98, 1.019, 0.97, 0.98),  # high=1.019 within buffer of bottom=1.02
         ]
         df = make_ohlc(data)
@@ -403,6 +407,7 @@ class TestFreshness:
             (1.00, 1.03, 0.98, 1.02),   # bullish → V-level demand at [0.99, 1.00]
             # Bearish candle whose body closes below the demand zone bottom (0.99)
             (0.995, 1.00, 0.97, 0.98),
+            (0.97, 0.98, 0.96, 0.975),  # extra candle (current)
         ]
         df = make_ohlc(data)
         zones = find_zones(df, lookback=40)
@@ -425,6 +430,7 @@ class TestFreshness:
             (1.02, 1.03, 0.98, 0.99),   # bearish → A-level supply at [1.02, 1.025]
             # Bullish candle whose body closes above the supply zone top (1.025)
             (1.02, 1.04, 1.01, 1.03),
+            (1.03, 1.04, 1.02, 1.035),  # extra candle (current)
         ]
         df = make_ohlc(data)
         zones = find_zones(df, lookback=40)
