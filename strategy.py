@@ -1,10 +1,5 @@
 import pandas as pd
-from config import (
-    HIGH_PIP_SYMBOLS, SKIP_VOLATILE_REGIME, ALWAYS_OPEN_KEYS,
-    BOS_BODY_RATIO, BOS_BODY_RELATIVE_MULT, DISPLACEMENT_BODY_RATIO,
-    USE_PREMIUM_DISCOUNT_FILTER, REQUIRE_INDUCEMENT_SWEEP, REQUIRE_BOS_FVG,
-    logger,
-)
+from config import HIGH_PIP_SYMBOLS, SKIP_VOLATILE_REGIME, ALWAYS_OPEN_KEYS, logger
 from regime import detect_regime, should_skip_regime
 
 
@@ -66,7 +61,7 @@ def _has_displacement(df, bar_index, direction, atr, min_mult=1.0):
             continue
         body_ratio = body / total_range
 
-        if body >= min_mult * atr and body_ratio >= DISPLACEMENT_BODY_RATIO:
+        if body >= min_mult * atr and body_ratio >= 0.6:
             # Confirm direction: displacement must move AWAY from zone
             is_bullish_candle = c['close'] > c['open']
             if direction == "demand" and is_bullish_candle:
@@ -170,12 +165,9 @@ def mark_freshness(zones, df):
         miss_window = 3
         miss_count = 0
 
-        # Mitigation buffer: 5% of zone width (floor at 0.02% of price)
-        # Price-based buffer (old: 0.1% of price) was too large for high-price
-        # instruments like BTC ($60 buffer at $60k), killing zones on normal wicks.
+        # Mitigation buffer: 0.1% of zone midpoint
         zone_mid = (z["top"] + z["bottom"]) / 2
-        zone_width = z["top"] - z["bottom"]
-        buffer = max(zone_width * 0.05, zone_mid * 0.0002)
+        buffer = zone_mid * 0.001
 
         buffered_top = z["top"] + buffer
         buffered_bottom = z["bottom"] - buffer
@@ -236,6 +228,9 @@ def mark_freshness(zones, df):
             nz_mid = (nz["top"] + nz["bottom"]) / 2
             buf = max(nz_width * 0.05, nz_mid * 0.0002)
             for j in range(start_check, freshness_end):
+            zone_mid = (nz["top"] + nz["bottom"]) / 2
+            buf = zone_mid * 0.001
+            for j in range(start_check, len(df)):
                 candle = df.iloc[j]
                 wick_touches = (candle['low'] <= nz["top"] + buf
                                 and candle['high'] >= nz["bottom"] - buf)
@@ -331,87 +326,18 @@ def find_swing_points(df_l, start=-23, end=-3):
     return segment['high'].max(), segment['low'].min()
 
 
-def classify_swing_sequence(df, lookback=30):
-    """Identify current market structure via swing point sequence.
-
-    Uses 3-bar pivot detection to find swing highs and lows, then checks
-    if the sequence makes HH/HL (uptrend) or LH/LL (downtrend).
-
-    Returns {"trend": "UP"|"DOWN"|"NONE", "swing_highs": [...], "swing_lows": [...]}.
-    """
-    if len(df) < 7:
-        return {"trend": "NONE", "swing_highs": [], "swing_lows": []}
-
-    start = max(0, len(df) - lookback)
-    segment = df.iloc[start:]
-    swing_highs = []
-    swing_lows = []
-
-    # 3-bar pivot: bar whose high/low exceeds both neighbors
-    for i in range(1, len(segment) - 1):
-        c = segment.iloc[i]
-        prev = segment.iloc[i - 1]
-        nxt = segment.iloc[i + 1]
-        if c['high'] > prev['high'] and c['high'] > nxt['high']:
-            swing_highs.append(c['high'])
-        if c['low'] < prev['low'] and c['low'] < nxt['low']:
-            swing_lows.append(c['low'])
-
-    trend = "NONE"
-    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
-        hh = swing_highs[-1] > swing_highs[-2]
-        hl = swing_lows[-1] > swing_lows[-2]
-        lh = swing_highs[-1] < swing_highs[-2]
-        ll = swing_lows[-1] < swing_lows[-2]
-        if hh and hl:
-            trend = "UP"
-        elif lh and ll:
-            trend = "DOWN"
-
-    return {"trend": trend, "swing_highs": swing_highs, "swing_lows": swing_lows}
-
-
-def _bos_creates_fvg(df, break_global_idx, direction, atr):
-    """Check if the BOS candle created an FVG (proof of institutional displacement).
-
-    Looks at 3-candle window: [break-1, break, break+1].
-    Returns True if an FVG gap exists in the displacement direction.
-    """
-    if break_global_idx < 1 or break_global_idx + 1 >= len(df):
-        return False
-    min_gap = atr * 0.3 if atr and atr > 0 else 0
-    c1 = df.iloc[break_global_idx - 1]
-    c3 = df.iloc[break_global_idx + 1]
-
-    if direction == "BULL":
-        # Bullish FVG: c3.low > c1.high
-        gap = c3['low'] - c1['high']
-        return gap >= min_gap
-    else:
-        # Bearish FVG: c1.low > c3.high
-        gap = c1['low'] - c3['high']
-        return gap >= min_gap
-
-
-def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None, classify=False):
+def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None):
     """Detect Break of Structure with displacement validation.
 
-    When classify=False (default): returns (bullish_bos, bearish_bos, bull_sweep, bear_sweep).
-    When classify=True: returns enriched dict with break_type (BOS vs MSS) and displacement_fvg.
-
+    Returns (bullish_bos, bearish_bos, bull_sweep, bear_sweep).
     - bullish_bos/bearish_bos: True if a candle *body* (close) broke the level
-      AND the breaking candle shows displacement (body > BOS_BODY_RATIO, body >= 1.5x avg).
+      AND the breaking candle shows displacement (body > 0.5*ATR, body_ratio > 0.5).
     - bull_sweep/bear_sweep: True if only a wick exceeded the level but body
       closed back inside — indicates a liquidity grab, not a real breakout.
+
+    Lookback widened to 10 (from 5) to bridge the gap with swing detection window.
     """
     if len(df_l) < lookback:
-        if classify:
-            return {
-                "bullish_bos": False, "bearish_bos": False,
-                "bull_sweep": False, "bear_sweep": False,
-                "break_type": None, "break_direction": None,
-                "displacement_fvg": False,
-            }
         return False, False, False, False
 
     segment = df_l.iloc[-lookback:]
@@ -420,22 +346,9 @@ def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None, classify=Fals
     bearish_bos = False
     bull_sweep = False
     bear_sweep = False
-    bull_break_idx = None
-    bear_break_idx = None
 
     # Minimum body size for BOS = 25% of ATR (reject noise breaks)
     min_bos_body = atr * 0.25 if atr and atr > 0 else 0
-
-    # Average body of candles preceding the lookback window for relative size check
-    pre_start = max(0, len(df_l) - lookback - 15)
-    pre_end = max(0, len(df_l) - lookback)
-    if pre_end > pre_start:
-        pre_bodies = df_l.iloc[pre_start:pre_end].apply(
-            lambda r: abs(r['close'] - r['open']), axis=1
-        )
-        avg_body = pre_bodies.mean() if len(pre_bodies) > 0 else 0
-    else:
-        avg_body = 0
 
     for idx in range(len(segment)):
         c = segment.iloc[idx]
@@ -444,18 +357,12 @@ def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None, classify=Fals
         body_ratio = body / total_range if total_range > 0 else 0
 
         # Bullish BOS: close above swing high with displacement
-        if (c['close'] > swing_high and body >= min_bos_body
-                and body_ratio >= BOS_BODY_RATIO
-                and (avg_body <= 0 or body >= avg_body * BOS_BODY_RELATIVE_MULT)):
+        if c['close'] > swing_high and body >= min_bos_body and body_ratio >= 0.5:
             bullish_bos = True
-            bull_break_idx = len(df_l) - lookback + idx  # global index
 
         # Bearish BOS: close below swing low with displacement
-        if (c['close'] < swing_low and body >= min_bos_body
-                and body_ratio >= BOS_BODY_RATIO
-                and (avg_body <= 0 or body >= avg_body * BOS_BODY_RELATIVE_MULT)):
+        if c['close'] < swing_low and body >= min_bos_body and body_ratio >= 0.5:
             bearish_bos = True
-            bear_break_idx = len(df_l) - lookback + idx
 
         # Wick sweeps (regardless of body size)
         if c['high'] > swing_high and c['close'] <= swing_high:
@@ -469,28 +376,7 @@ def detect_bos(df_l, swing_high, swing_low, lookback=10, atr=None, classify=Fals
     if bearish_bos:
         bear_sweep = False
 
-    if not classify:
-        return bullish_bos, bearish_bos, bull_sweep, bear_sweep
-
-    # Enriched classification: BOS vs MSS + FVG displacement proof
-    trend_info = classify_swing_sequence(df_l)
-    trend = trend_info["trend"]
-    is_mss = (bullish_bos and trend == "DOWN") or (bearish_bos and trend == "UP")
-
-    # Check if BOS created an FVG (displacement proof)
-    disp_fvg = False
-    if bullish_bos and bull_break_idx is not None:
-        disp_fvg = _bos_creates_fvg(df_l, bull_break_idx, "BULL", atr)
-    elif bearish_bos and bear_break_idx is not None:
-        disp_fvg = _bos_creates_fvg(df_l, bear_break_idx, "BEAR", atr)
-
-    return {
-        "bullish_bos": bullish_bos, "bearish_bos": bearish_bos,
-        "bull_sweep": bull_sweep, "bear_sweep": bear_sweep,
-        "break_type": "MSS" if is_mss else ("BOS" if (bullish_bos or bearish_bos) else None),
-        "break_direction": "BULL" if bullish_bos else ("BEAR" if bearish_bos else None),
-        "displacement_fvg": disp_fvg,
-    }
+    return bullish_bos, bearish_bos, bull_sweep, bear_sweep
 
 
 def detect_fvg(df_l, lookback=15, atr=None):
@@ -518,12 +404,10 @@ def detect_fvg(df_l, lookback=15, atr=None):
         if c3['low'] > c1['high'] and (c3['low'] - c1['high']) >= min_gap:
             fvg_top = c3['low']
             fvg_bottom = c1['high']
-            # Check mitigation: any subsequent candle's body closed into the gap?
-            # Institutional theory: only a body close counts as mitigation, not a wick dip
+            # Check mitigation: any subsequent candle's low dipped into the gap?
             mitigated = False
             for j in range(i + 1, len(df_l)):
-                body_low = min(df_l.iloc[j]['close'], df_l.iloc[j]['open'])
-                if body_low <= fvg_top:
+                if df_l.iloc[j]['low'] <= fvg_top:
                     mitigated = True
                     break
             if not mitigated:
@@ -536,8 +420,7 @@ def detect_fvg(df_l, lookback=15, atr=None):
             fvg_bottom = c3['high']
             mitigated = False
             for j in range(i + 1, len(df_l)):
-                body_high = max(df_l.iloc[j]['close'], df_l.iloc[j]['open'])
-                if body_high >= fvg_bottom:
+                if df_l.iloc[j]['high'] >= fvg_bottom:
                     mitigated = True
                     break
             if not mitigated:
@@ -591,16 +474,15 @@ def compute_volume_proxy(df, zone, lookback=5):
 
 
 def calculate_levels(sig_type, entry, sl_anchor, max_risk_price, tp_target,
-                      htf_extreme=None, sl_multiplier=1.0, opposing_ltf_zones=None):
+                      htf_extreme=None, sl_multiplier=1.0):
     """Calculate entry, SL, and multi-TP levels for a signal.
 
     Args:
         sl_anchor: Structural level for SL (zone boundary, sweep wick, or FVG edge).
         max_risk_price: Maximum allowed risk in price units.
         sl_multiplier: Combined multiplier (regime + zone quality) for max risk.
-        opposing_ltf_zones: List of fresh LTF zones for structural TP1 placement.
 
-    TP1 = first structural obstacle or 1:1 RR (whichever is closer, min 1:1)
+    TP1 = 1:1 RR (safe target, move SL to breakeven after)
     TP2 = opposing zone target (standard)
     TP3 = HTF extreme or 1:3 RR (runner)
     """
@@ -610,22 +492,10 @@ def calculate_levels(sig_type, entry, sl_anchor, max_risk_price, tp_target,
         raw_sl = sl_anchor
         sl = entry - effective_max_risk if (entry - raw_sl) > effective_max_risk else raw_sl
         risk = abs(entry - sl)
-        tp1 = entry + risk          # 1:1 default
+        tp1 = entry + risk          # 1:1
         tp2 = tp_target             # opposing zone
         tp3_rr = entry + risk * 3   # 1:3
         tp3 = max(tp3_rr, htf_extreme) if htf_extreme and htf_extreme > entry else tp3_rr
-
-        # Structural TP1: nearest opposing zone between entry and 1:1
-        if opposing_ltf_zones:
-            supply_above = [z for z in opposing_ltf_zones
-                           if z["direction"] == "supply" and z["bottom"] > entry]
-            if supply_above:
-                nearest = min(supply_above, key=lambda z: z["bottom"])
-                structural_tp1 = nearest["bottom"]
-                # Use if closer than 1:1 but at least 0.8:1 RR
-                if entry + risk * 0.8 <= structural_tp1 < tp1:
-                    tp1 = structural_tp1
-
         # Ensure TP ordering: TP1 < TP2 < TP3
         tp2 = max(tp2, tp1)
         tp3 = max(tp3, tp2)
@@ -633,21 +503,10 @@ def calculate_levels(sig_type, entry, sl_anchor, max_risk_price, tp_target,
         raw_sl = sl_anchor
         sl = entry + effective_max_risk if (raw_sl - entry) > effective_max_risk else raw_sl
         risk = abs(sl - entry)
-        tp1 = entry - risk          # 1:1 default
+        tp1 = entry - risk          # 1:1
         tp2 = tp_target             # opposing zone
         tp3_rr = entry - risk * 3   # 1:3
         tp3 = min(tp3_rr, htf_extreme) if htf_extreme and htf_extreme < entry else tp3_rr
-
-        # Structural TP1: nearest opposing zone between entry and 1:1
-        if opposing_ltf_zones:
-            demand_below = [z for z in opposing_ltf_zones
-                           if z["direction"] == "demand" and z["top"] < entry]
-            if demand_below:
-                nearest = max(demand_below, key=lambda z: z["top"])
-                structural_tp1 = nearest["top"]
-                if tp1 < structural_tp1 <= entry - risk * 0.8:
-                    tp1 = structural_tp1
-
         # Ensure TP ordering: TP1 > TP2 > TP3
         tp2 = min(tp2, tp1)
         tp3 = min(tp3, tp2)
@@ -668,7 +527,7 @@ def detect_bias(df_h, lookback=20):
     return "BEAR"
 
 
-def _htf_rejection(df_h, zones, direction, candles_to_check=5):
+def _htf_rejection(df_h, zones, direction, candles_to_check=3):
     """Check if a recent HTF candle rejected off a fresh zone.
 
     For a bullish rejection (demand zone): wick enters zone but body closes
@@ -782,11 +641,10 @@ def detect_storyline(df_h, df_l):
     if len(df_h) < 10 or len(df_l) < 23:
         return None
 
-    # Compute ATR for both timeframes (LTF ATR needed for BOS displacement filter)
+    # Compute HTF ATR for zone width filtering
     from regime import compute_atr
     htf_atr = compute_atr(df_h)
-    ltf_atr = compute_atr(df_l)
-    htf_zones = find_zones(df_h, lookback=80, atr=htf_atr)
+    htf_zones = find_zones(df_h, lookback=40, atr=htf_atr)
     htf_zones = mark_freshness(htf_zones, df_h)
     fresh_htf = [z for z in htf_zones if z["fresh"]]
 
@@ -804,10 +662,7 @@ def detect_storyline(df_h, df_l):
         swing_high, swing_low = find_swing_points(df_l)
         confirmed = False
         if swing_high is not None:
-            # Use lenient ATR (0.25x) for bias confirmation — stricter filtering
-            # is applied later in get_smc_signal() for trade entry BOS
-            bias_atr = ltf_atr * 0.5 if ltf_atr else None
-            result = detect_bos(df_l, swing_high, swing_low, atr=bias_atr)
+            result = detect_bos(df_l, swing_high, swing_low)
             bull_bos = result[0]
             confirmed = bool(bull_bos)
         return {
@@ -824,8 +679,7 @@ def detect_storyline(df_h, df_l):
         swing_high, swing_low = find_swing_points(df_l)
         confirmed = False
         if swing_high is not None:
-            bias_atr = ltf_atr * 0.5 if ltf_atr else None
-            result = detect_bos(df_l, swing_high, swing_low, atr=bias_atr)
+            result = detect_bos(df_l, swing_high, swing_low)
             bear_bos = result[1]
             confirmed = bool(bear_bos)
         return {
@@ -844,13 +698,15 @@ def detect_storyline(df_h, df_l):
     #   2) LTF BOS is confirmed (directional conviction, not just momentum)
     # This preserves the "no structure = no trade" rule while adapting to
     # crypto's tendency to trend through zones rather than reject off them.
+    from config import ALWAYS_OPEN_KEYS
+    is_always_open_ctx = hasattr(detect_storyline, '_pair') and any(
+        k in detect_storyline._pair for k in ALWAYS_OPEN_KEYS)
+
     # Use LTF BOS to determine bias direction when HTF zones exist but no rejection
-    # Lenient ATR (0.25x effective) for bias detection — entry BOS is stricter
     if fresh_htf:
         swing_high, swing_low = find_swing_points(df_l)
         if swing_high is not None:
-            bias_atr = ltf_atr * 0.5 if ltf_atr else None
-            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low, atr=bias_atr)
+            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low)
 
             if bull_bos and demand_zones:
                 # LTF confirms bullish + HTF demand zones exist = structural bull bias
@@ -859,16 +715,6 @@ def detect_storyline(df_h, df_l):
                 roadblock = _check_roadblock(fresh_htf, "BULL", current_price, tp)
                 return {
                     "bias": "BULL", "htf_zone": best_demand, "tp_target": tp,
-                    "confirmed": True, "roadblock_near": roadblock,
-                }
-            elif bull_bos and fresh_htf:
-                # Bull BOS but no demand zones (all broken/flipped to supply in uptrend).
-                # Use nearest fresh zone for structural context — BOS provides direction.
-                best = max(fresh_htf, key=lambda z: z["bar_index"])
-                tp = _opposing_zone_tp(fresh_htf, "BULL", current_price, df_h['high'].max())
-                roadblock = _check_roadblock(fresh_htf, "BULL", current_price, tp)
-                return {
-                    "bias": "BULL", "htf_zone": best, "tp_target": tp,
                     "confirmed": True, "roadblock_near": roadblock,
                 }
 
@@ -880,67 +726,6 @@ def detect_storyline(df_h, df_l):
                 return {
                     "bias": "BEAR", "htf_zone": best_supply, "tp_target": tp,
                     "confirmed": True, "roadblock_near": roadblock,
-                }
-            elif bear_bos and fresh_htf:
-                # Bear BOS but no supply zones (all broken/flipped to demand in downtrend).
-                # Use nearest fresh zone for structural context — BOS provides direction.
-                best = max(fresh_htf, key=lambda z: z["bar_index"])
-                tp = _opposing_zone_tp(fresh_htf, "BEAR", current_price, df_h['low'].min())
-                roadblock = _check_roadblock(fresh_htf, "BEAR", current_price, tp)
-                return {
-                    "bias": "BEAR", "htf_zone": best, "tp_target": tp,
-                    "confirmed": True, "roadblock_near": roadblock,
-                }
-
-    # Secondary fallback: fresh zones are empty but structure still exists
-    # (zones were retested but remain valid structural levels)
-    all_htf_zones = htf_zones  # includes unfresh zones
-    if all_htf_zones:
-        swing_high, swing_low = find_swing_points(df_l)
-        if swing_high is not None:
-            bias_atr = ltf_atr * 0.5 if ltf_atr else None
-            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low, atr=bias_atr)
-
-            if bull_bos:
-                demand_z = [z for z in all_htf_zones if z["direction"] == "demand"]
-                best = max(demand_z or all_htf_zones, key=lambda z: z["bar_index"])
-                tp = _opposing_zone_tp(all_htf_zones, "BULL", current_price, df_h['high'].max())
-                roadblock = _check_roadblock(all_htf_zones, "BULL", current_price, tp)
-                return {
-                    "bias": "BULL", "htf_zone": best, "tp_target": tp,
-                    "confirmed": True, "roadblock_near": roadblock,
-                }
-
-            if bear_bos:
-                supply_z = [z for z in all_htf_zones if z["direction"] == "supply"]
-                best = max(supply_z or all_htf_zones, key=lambda z: z["bar_index"])
-                tp = _opposing_zone_tp(all_htf_zones, "BEAR", current_price, df_h['low'].min())
-                roadblock = _check_roadblock(all_htf_zones, "BEAR", current_price, tp)
-                return {
-                    "bias": "BEAR", "htf_zone": best, "tp_target": tp,
-                    "confirmed": True, "roadblock_near": roadblock,
-                }
-
-    # Last resort: no zones at all — use LTF BOS with synthetic HTF structure
-    if len(df_h) >= 20:
-        swing_high, swing_low = find_swing_points(df_l)
-        if swing_high is not None:
-            bias_atr = ltf_atr * 0.5 if ltf_atr else None
-            bull_bos, bear_bos, _, _ = detect_bos(df_l, swing_high, swing_low, atr=bias_atr)
-            if bull_bos or bear_bos:
-                bias = "BULL" if bull_bos else "BEAR"
-                recent_high = df_h['high'].iloc[-20:].max()
-                recent_low = df_h['low'].iloc[-20:].min()
-                mid = (recent_high + recent_low) / 2
-                synthetic_zone = {
-                    "type": "SYNTHETIC", "direction": "demand" if bull_bos else "supply",
-                    "top": mid, "bottom": mid, "bar_index": len(df_h) - 1,
-                    "fresh": False, "miss": False,
-                }
-                fallback_tp = recent_high if bull_bos else recent_low
-                return {
-                    "bias": bias, "htf_zone": synthetic_zone, "tp_target": fallback_tp,
-                    "confirmed": True, "roadblock_near": False,
                 }
 
     return None
@@ -1034,49 +819,19 @@ def detect_inducement_swept(df, swing_high, swing_low, direction, lookback=15):
 
 
 # =====================
-# Premium / Discount Zone Filter
-# =====================
-
-def is_in_premium_discount(price, swing_high, swing_low):
-    """Classify price position within the current swing range.
-
-    Premium = above 55% of range (sell zone)
-    Discount = below 45% of range (buy zone)
-    Equilibrium = 45-55% band around midpoint
-
-    Returns 'premium', 'discount', or 'equilibrium'.
-    """
-    if swing_high is None or swing_low is None or swing_high == swing_low:
-        return "equilibrium"
-    ratio = (price - swing_low) / (swing_high - swing_low)
-    if ratio > 0.55:
-        return "premium"
-    elif ratio < 0.45:
-        return "discount"
-    return "equilibrium"
-
-
-# =====================
 # Signal Generation — MSNR Sniper Protocol
 # =====================
 
-def _compute_confidence(sweep_detected, engulfing, zone, fvg_match,
-                        touch_entry=False, is_mss=False, bos_fvg=False):
+def _compute_confidence(sweep_detected, engulfing, zone, fvg_match, touch_entry=False):
     """Compute confidence tier based on trigger quality.
 
-    Platinum: MSS + Sweep + Engulfing + FVG match → HIGH (strongest reversal)
     Gold Tier:  Inducement Sweep + Engulfing → HIGH
-    Silver+:    Engulfing + BOS-created FVG → MEDIUM (displacement proof)
     Silver Tier: Engulfing Only → MEDIUM
     Touch Tier:  Sweep + Zone + Compression (no engulfing) → MEDIUM (touch)
     Otherwise:   LOW (should typically be filtered out by layers above)
     """
-    if is_mss and sweep_detected and engulfing and fvg_match:
-        return "high"  # Platinum: reversal at POI with full confirmation
     if sweep_detected and engulfing:
         return "high"
-    if engulfing and bos_fvg:
-        return "medium"
     if engulfing:
         return "medium"
     if touch_entry and sweep_detected:
@@ -1124,7 +879,7 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
         return None
     bias = storyline["bias"]
 
-    # Swing points + BOS (enriched with MSS classification + FVG displacement)
+    # Swing points + BOS
     swing_high, swing_low = find_swing_points(df_l)
     if swing_high is None:
         logger.debug("REJECT %s: no swing points found", pair)
@@ -1148,9 +903,12 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
     if REQUIRE_BOS_FVG and (bullish_bos or bearish_bos) and not bos_fvg:
         logger.debug("REJECT %s: BOS without FVG displacement", pair)
         return None
+    bullish_bos, bearish_bos, bull_sweep, bear_sweep = detect_bos(
+        df_l, swing_high, swing_low, atr=atr
+    )
 
     # H4 Gatekeeper: FORBID trading against H4 bias
-    # MSS aligned with HTF bias is a valid reversal setup and passes through
+    # If H4 says BEAR, no BUY signals allowed (and vice versa)
     if bias == "BULL" and not bullish_bos:
         logger.debug("REJECT %s: bias=BULL but no bullish BOS (bos_atr=%.6f)", pair, bos_atr or 0)
         return None
@@ -1240,8 +998,7 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
         fvg_match = (fvg is not None and fvg.get("type") == "BULL_FVG")
         confidence = _compute_confidence(
-            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch,
-            is_mss=is_mss, bos_fvg=bos_fvg,
+            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch
         )
 
         # Volume proxy as confidence gate (not just display)
@@ -1281,26 +1038,13 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             sl_mult *= 0.85  # strong displacement = tighter SL
 
         htf_extreme = df_h['high'].max()
-        # FVG magnetic TP: snap TP to nearby unfilled HTF FVG if within range
-        htf_atr_val = atr  # use LTF ATR as proxy
-        htf_fvg = detect_fvg(df_h, lookback=30, atr=htf_atr_val)
-        if htf_fvg and htf_fvg["type"] == "BEAR_FVG":
-            fvg_start = htf_fvg["bottom"]
-            if entry_price < fvg_start and tp_target > 0:
-                dist_to_tp = abs(tp_target - entry_price)
-                dist_to_fvg = abs(fvg_start - tp_target)
-                if dist_to_tp > 0 and dist_to_fvg / dist_to_tp < 0.2:
-                    tp_target = fvg_start  # Snap to FVG boundary
-
         limit_levels = calculate_levels(
             "BUY", entry_price, sl_anchor, max_risk_price, tp_target,
             htf_extreme=htf_extreme, sl_multiplier=sl_mult,
-            opposing_ltf_zones=all_fresh_ltf,
         )
         market_levels = calculate_levels(
             "BUY", c['close'], sl_anchor, max_risk_price, tp_target,
             htf_extreme=htf_extreme, sl_multiplier=sl_mult,
-            opposing_ltf_zones=all_fresh_ltf,
         )
 
         return {
@@ -1323,9 +1067,6 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             "atr": regime_info["atr"],
             "sl_multiplier": regime_info["sl_multiplier"],
             "volume_proxy": vol_proxy,
-            "break_type": break_type,
-            "displacement_fvg": bos_fvg,
-            "pd_zone": pd_zone,
         }
 
     if bias == "BEAR":
@@ -1395,8 +1136,7 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
 
         fvg_match = (fvg is not None and fvg.get("type") == "BEAR_FVG")
         confidence = _compute_confidence(
-            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch,
-            is_mss=is_mss, bos_fvg=bos_fvg,
+            sweep_detected, engulfing, zone, fvg_match, touch_entry=is_touch
         )
 
         # Volume proxy as confidence gate (not just display)
@@ -1435,25 +1175,13 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             sl_mult *= 0.85  # strong displacement = tighter SL
 
         htf_extreme = df_h['low'].min()
-        # FVG magnetic TP: snap TP to nearby unfilled HTF FVG if within range
-        htf_fvg = detect_fvg(df_h, lookback=30, atr=atr)
-        if htf_fvg and htf_fvg["type"] == "BULL_FVG":
-            fvg_start = htf_fvg["top"]
-            if entry_price > fvg_start and tp_target > 0:
-                dist_to_tp = abs(entry_price - tp_target)
-                dist_to_fvg = abs(tp_target - fvg_start)
-                if dist_to_tp > 0 and dist_to_fvg / dist_to_tp < 0.2:
-                    tp_target = fvg_start  # Snap to FVG boundary
-
         limit_levels = calculate_levels(
             "SELL", entry_price, sl_anchor, max_risk_price, tp_target,
             htf_extreme=htf_extreme, sl_multiplier=sl_mult,
-            opposing_ltf_zones=all_fresh_ltf,
         )
         market_levels = calculate_levels(
             "SELL", c['close'], sl_anchor, max_risk_price, tp_target,
             htf_extreme=htf_extreme, sl_multiplier=sl_mult,
-            opposing_ltf_zones=all_fresh_ltf,
         )
 
         return {
@@ -1476,9 +1204,6 @@ def get_smc_signal(df_l, df_h, pair, risk_pips=50, touch_trade=False):
             "atr": regime_info["atr"],
             "sl_multiplier": regime_info["sl_multiplier"],
             "volume_proxy": vol_proxy,
-            "break_type": break_type,
-            "displacement_fvg": bos_fvg,
-            "pd_zone": pd_zone,
         }
 
     return None

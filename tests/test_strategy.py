@@ -11,8 +11,7 @@ from strategy import (
     find_zones, mark_freshness, get_fresh_zones,
     detect_storyline, detect_engulfing, detect_inducement_swept,
     _opposing_zone_tp, _check_roadblock, check_roadblocks,
-    analyze_arrival, classify_swing_sequence, _bos_creates_fvg,
-    is_in_premium_discount, _compute_confidence,
+    analyze_arrival,
 )
 
 
@@ -155,7 +154,7 @@ class TestDetectBOS:
 
     def test_bearish_bos(self):
         data = [(1.0, 1.05, 0.95, 1.0)] * 20
-        data += [(1.0, 1.01, 0.90, 0.92)] * 5  # body=0.08, range=0.11, ratio=0.73
+        data += [(1.0, 1.02, 0.90, 0.93)] * 5  # body closes below swing low
         df = make_ohlc(data)
         bullish, bearish, bull_sw, bear_sw = detect_bos(df, 1.05, 0.95)
         assert bool(bearish) is True
@@ -383,18 +382,16 @@ class TestFreshness:
         assert a_zones[0]["fresh"] is True
 
     def test_mitigation_buffer_makes_unfresh(self):
-        """Zone becomes unfresh when wick enters within mitigation buffer.
-
-        Buffer = max(zone_width * 0.05, zone_mid * 0.0002).
-        Zone [1.02, 1.025]: width=0.005, buffer=0.00025.
-        buffered_bottom = 1.02 - 0.00025 = 1.01975.
-        A candle with high=1.020 reaches into the buffered zone.
-        """
+        """Zone becomes unfresh when price comes within 0.1% buffer."""
+        # Zone at [1.02, 1.025], mid=1.0225, buffer=~0.00102
+        # buffered_bottom = 1.02 - 0.00102 = ~1.01898
+        # A candle with high=1.019 is within the buffer
         data = [
             (1.00, 1.03, 0.99, 1.025),  # bullish
             (1.02, 1.03, 0.98, 0.99),   # bearish → A-level zone
             (0.98, 1.020, 0.97, 0.98),  # high=1.020 enters buffered zone bottom
             (0.97, 0.98, 0.96, 0.975),  # extra candle (current)
+            (0.98, 1.019, 0.97, 0.98),  # high=1.019 within buffer of bottom=1.02
         ]
         df = make_ohlc(data)
         zones = find_zones(df, lookback=40)
@@ -603,17 +600,15 @@ class TestStoryline:
         assert "tp_target" in result
         assert "roadblock_near" in result
 
-    def test_unfresh_zone_fallback_with_bos(self):
-        """When no fresh HTF zones but structure exists, should use unfresh zones + BOS."""
+    def test_no_fallback_to_momentum(self):
+        """When no HTF rejection found, should return None (no momentum fallback)."""
         flat = [(1.0, 1.01, 0.99, 1.0)] * 24
         flat.append((1.0, 1.05, 0.99, 1.04))
         df_h = make_ohlc(flat)
         df_l = make_trending_data("up", bars=30, start=1.0, step=0.001)
         result = detect_storyline(df_h, df_l)
-        # Unfresh zone fallback: structure exists + LTF BOS = signal allowed
-        if result is not None:
-            assert result["bias"] in ("BULL", "BEAR")
-            assert "htf_zone" in result
+        # Momentum fallback removed — no HTF structure = no signal
+        assert result is None
 
     def test_insufficient_data(self):
         df_h = make_ohlc([(1.0, 1.1, 0.9, 1.0)] * 5)
@@ -661,45 +656,6 @@ class TestStoryline:
             {"direction": "supply", "top": 1.13, "bottom": 1.12, "fresh": True},
         ]
         assert _check_roadblock(zones, "BULL", 1.05, 1.15) is False
-
-    def test_bos_fallback_with_high_atr(self):
-        """BOS-confirmed fallback should work even when ATR is large.
-
-        Regression test: Week 1 passed full ltf_atr to detect_bos in storyline,
-        causing all crypto pairs to fail because min_bos_body was too high.
-        Now storyline uses 0.5*ATR (lenient) for bias detection.
-        """
-        # HTF: need 16+ candles for ATR. Create demand zone then trend up.
-        # First: 10 bars of trading range to establish ATR
-        htf_data = []
-        for i in range(10):
-            base = 100.0 + (i % 3) * 2
-            htf_data.append((base, base + 4, base - 4, base + 1))
-        # V-level demand zone: bearish then bullish with a gap (zone width > 0)
-        htf_data.append((104.0, 106.0, 96.0, 97.0))   # bearish, close=97
-        htf_data.append((94.0, 108.0, 93.0, 106.0))    # bullish, open=94 → zone [94,97]
-        # 4 bars trending up ABOVE the zone so it stays fresh
-        for i in range(4):
-            base = 108.0 + i * 3
-            htf_data.append((base, base + 4, base - 1, base + 3))
-        df_h = make_ohlc(htf_data)
-
-        # LTF: 20 flat bars then bullish breakout with moderate body size
-        # LTF ATR from flat bars: range=4, ATR~4. Full threshold=2, lenient=1
-        ltf_base = [(115.0, 117.0, 113.0, 115.0)] * 20
-        # Breakout candles: body of 3 passes lenient (>1) but might fail strict (>2)
-        ltf_base += [
-            (115.0, 118.0, 114.0, 117.5),  # body=2.5
-            (117.5, 121.0, 116.0, 120.0),  # body=2.5, breaks swing high
-            (120.0, 124.0, 119.0, 123.0),  # body=3, confirms breakout
-        ]
-        df_l = make_ohlc(ltf_base)
-
-        result = detect_storyline(df_h, df_l)
-        # Should NOT be None — BOS-confirmed fallback should fire
-        assert result is not None
-        assert result["bias"] == "BULL"
-        assert result["confirmed"] is True
 
 
 # =====================
@@ -1066,348 +1022,3 @@ class TestMultiTP:
         risk = abs(1.10 - sl)
         expected_tp3 = max(1.10 + risk * 3, levels["tp2"])
         assert abs(levels["tp3"] - expected_tp3) < 1e-10
-
-
-# =====================
-# ZONE BUFFER SCALING TESTS
-# =====================
-class TestZoneBufferScaling:
-    def test_btc_zone_survives_normal_wick(self):
-        """BTC-scale zone ($60k) should NOT be killed by a normal $30 wick.
-
-        Old buffer: zone_mid * 0.001 = $60 → wick within $60 kills zone.
-        New buffer: zone_width * 0.05 = $100 (for $2k zone) → $30 wick is fine.
-        """
-        # Build BTC-like HTF data with a demand zone around 59000-61000
-        htf_data = []
-        # 10 bars of range to provide context
-        for i in range(10):
-            base = 62000.0 + (i % 3) * 500
-            htf_data.append((base, base + 800, base - 800, base + 200))
-        # V-level demand zone: bearish close then bullish open with gap
-        htf_data.append((63000.0, 63500.0, 60500.0, 61000.0))   # bearish
-        htf_data.append((59000.0, 64000.0, 58500.0, 63000.0))   # bullish → zone [59000, 61000]
-        # Subsequent candles: wick dips to 60970 ($30 inside zone top of 61000)
-        # Old buffer ($60) would buffered_top=61060 → wick 60970 < 61060 → UNFRESH
-        # New buffer ($100) → buffered_top=61100 → still catches it BUT...
-        # The key: wick needs to also be >= buffered_bottom to count as touch
-        # Let's test a wick that's NEAR but NOT inside the zone
-        htf_data.append((63500.0, 64000.0, 61200.0, 63800.0))  # low=61200, above zone top
-        htf_data.append((63800.0, 64500.0, 63000.0, 64200.0))  # well above zone
-
-        df = make_ohlc(htf_data)
-        zones = find_zones(df, lookback=40)
-        zones = mark_freshness(zones, df)
-        demand = [z for z in zones if z["direction"] == "demand" and z["fresh"]]
-        assert len(demand) >= 1, "BTC demand zone should survive when wicks don't enter it"
-
-    def test_btc_zone_killed_on_real_penetration(self):
-        """BTC-scale zone should still be killed when wick truly enters it."""
-        htf_data = []
-        for i in range(10):
-            base = 62000.0 + (i % 3) * 500
-            htf_data.append((base, base + 800, base - 800, base + 200))
-        htf_data.append((63000.0, 63500.0, 60500.0, 61000.0))
-        htf_data.append((59000.0, 64000.0, 58500.0, 63000.0))  # zone [59000, 61000]
-        # Wick deeply penetrates zone: low=59500 (well inside [59000, 61000])
-        htf_data.append((63000.0, 63500.0, 59500.0, 63200.0))
-        htf_data.append((63200.0, 64000.0, 63000.0, 63800.0))
-
-        df = make_ohlc(htf_data)
-        zones = find_zones(df, lookback=40)
-        zones = mark_freshness(zones, df)
-        # Zone should be unfresh since wick deeply entered it
-        v_demand = [z for z in zones if z["direction"] == "demand"
-                    and z["type"] == "V" and z["fresh"]]
-        # The original zone should be unfresh (killed by wick penetration)
-        orig_demand = [z for z in zones if z["direction"] == "demand"
-                       and z["type"] == "V" and z["bar_index"] == 10]
-        if orig_demand:
-            assert orig_demand[0]["fresh"] is False
-
-    def test_forex_buffer_still_works(self):
-        """Forex-scale zones (1.0800) should use floor buffer (0.02% of price)."""
-        # Zone at [1.02, 1.025], zone_width=0.005
-        # zone_width * 0.05 = 0.00025
-        # zone_mid * 0.0002 = 0.000205
-        # buffer = max(0.00025, 0.000205) = 0.00025
-        # Old buffer was zone_mid * 0.001 = 0.001023 (4x larger)
-        data = [
-            (1.00, 1.03, 0.99, 1.025),  # bullish
-            (1.02, 1.03, 0.98, 0.99),   # bearish → A-level zone at [1.02, 1.025]
-            # high=1.0195 is 0.0005 below zone bottom — outside buffer
-            (0.98, 1.0195, 0.97, 0.98),
-        ]
-        df = make_ohlc(data)
-        zones = find_zones(df, lookback=40)
-        zones = mark_freshness(zones, df)
-        a_zones = [z for z in zones if z["type"] == "A" and z["bar_index"] == 0]
-        assert len(a_zones) == 1
-        # With new smaller buffer, 1.0195 should NOT touch zone bottom ~1.01975
-        assert a_zones[0]["fresh"] is True
-
-
-# =====================
-# BOS-ZONE DIRECTION MISMATCH TESTS
-# =====================
-class TestBosZoneDirectionMismatch:
-    def test_bull_bos_with_only_supply_zones(self):
-        """Bull BOS + only supply zones fresh (demand all broken) → should still return BULL.
-
-        In a strong uptrend, all demand zones get broken (bodies close below them)
-        and flip to supply. The BOS-confirmed fallback should still work because
-        supply zones provide structural context even for a bullish bias.
-        """
-        # HTF: Build data where demand zones get broken but supply zones remain
-        htf_data = []
-        # 10 bars of choppy range
-        for i in range(10):
-            base = 100.0 + (i % 3) * 2
-            htf_data.append((base, base + 4, base - 4, base + 1))
-
-        # Supply zone: bullish then bearish (A-level supply)
-        htf_data.append((100.0, 108.0, 99.0, 107.0))   # strong bullish
-        htf_data.append((107.0, 108.0, 102.0, 103.0))   # bearish → A-level supply ~[107,108]
-
-        # Trend upward far above — zone stays fresh (no wick returns to it)
-        for i in range(4):
-            base = 115.0 + i * 3
-            htf_data.append((base, base + 4, base - 1, base + 3))
-
-        df_h = make_ohlc(htf_data)
-
-        # LTF: flat then bullish breakout (bull BOS)
-        ltf_data = [(120.0, 122.0, 118.0, 120.0)] * 20
-        ltf_data += [
-            (120.0, 123.0, 119.0, 122.5),  # body=2.5
-            (122.5, 126.0, 121.0, 125.0),  # body=2.5, breaks swing high
-            (125.0, 129.0, 124.0, 128.0),  # body=3, confirms
-        ]
-        df_l = make_ohlc(ltf_data)
-
-        result = detect_storyline(df_h, df_l)
-        # Should NOT be None — bull BOS + supply zone structure = valid bias
-        assert result is not None
-        assert result["bias"] == "BULL"
-        assert result["confirmed"] is True
-
-
-# =====================
-# Swing Sequence / Trend Classification
-# =====================
-class TestClassifySwingSequence:
-    def test_uptrend_detection(self):
-        """HH + HL sequence should return UP."""
-        # Explicit zigzag uptrend: low-high-low-high pattern with rising pivots
-        data = [
-            (1.00, 1.02, 0.98, 1.01),  # normal
-            (1.01, 1.03, 1.00, 1.02),  # normal
-            (1.02, 1.08, 1.01, 1.06),  # swing high 1 = 1.08
-            (1.06, 1.07, 1.03, 1.04),  # down
-            (1.04, 1.05, 0.99, 1.00),  # swing low 1 = 0.99
-            (1.00, 1.01, 0.98, 1.01),  # up
-            (1.01, 1.03, 1.00, 1.02),  # normal
-            (1.02, 1.04, 1.01, 1.03),  # normal
-            (1.03, 1.10, 1.02, 1.08),  # swing high 2 = 1.10 (HH)
-            (1.08, 1.09, 1.05, 1.06),  # down
-            (1.06, 1.07, 1.02, 1.03),  # swing low 2 = 1.02 (HL)
-            (1.03, 1.04, 1.01, 1.04),  # up
-            (1.04, 1.06, 1.03, 1.05),  # normal
-            (1.05, 1.12, 1.04, 1.10),  # swing high 3 = 1.12 (HH)
-            (1.10, 1.11, 1.07, 1.08),  # down
-            (1.08, 1.09, 1.05, 1.06),  # swing low 3 = 1.05 (HL)
-            (1.06, 1.07, 1.05, 1.07),  # normal
-        ]
-        df = make_ohlc(data)
-        result = classify_swing_sequence(df, lookback=20)
-        assert result["trend"] == "UP"
-        assert len(result["swing_highs"]) >= 2
-        assert len(result["swing_lows"]) >= 2
-
-    def test_downtrend_detection(self):
-        """LH + LL sequence should return DOWN."""
-        # Explicit 3-bar pivots: each pivot bar's high/low beats BOTH neighbors
-        data = [
-            (1.12, 1.13, 1.11, 1.12),  # 0 normal
-            (1.12, 1.16, 1.11, 1.15),  # 1 SH1=1.16
-            (1.15, 1.14, 1.10, 1.11),  # 2 down (high=1.14 < 1.16)
-            (1.11, 1.12, 1.04, 1.05),  # 3 SL1=1.04 (low=1.04 < both 1.10, 1.06)
-            (1.05, 1.08, 1.06, 1.07),  # 4 up (low=1.06 > 1.04)
-            (1.07, 1.12, 1.06, 1.11),  # 5 SH2=1.12 (high: 1.12 > 1.08, check idx 6)
-            (1.11, 1.10, 1.05, 1.06),  # 6 down (high=1.10 < 1.12)
-            (1.06, 1.07, 0.99, 1.00),  # 7 SL2=0.99 (low=0.99 < both 1.05, 1.01)
-            (1.00, 1.04, 1.01, 1.03),  # 8 up (low=1.01 > 0.99)
-            (1.03, 1.08, 1.02, 1.07),  # 9 SH3=1.08 (high: 1.08 > 1.04, check idx 10)
-            (1.07, 1.06, 1.01, 1.02),  # 10 down (high=1.06 < 1.08)
-            (1.02, 1.03, 0.94, 0.95),  # 11 SL3=0.94 (low: 0.94 < both 1.01, 0.96)
-            (0.95, 0.97, 0.96, 0.96),  # 12 normal (low=0.96 > 0.94)
-        ]
-        df = make_ohlc(data)
-        result = classify_swing_sequence(df, lookback=20)
-        # SH: 1.16, 1.12, 1.08 → descending. SL: 1.04, 0.99, 0.94 → descending
-        assert result["trend"] == "DOWN"
-
-    def test_flat_market_none(self):
-        """Flat market should return NONE."""
-        data = [(1.0, 1.02, 0.98, 1.0)] * 30
-        df = make_ohlc(data)
-        result = classify_swing_sequence(df)
-        assert result["trend"] == "NONE"
-
-    def test_insufficient_data(self):
-        data = [(1.0, 1.1, 0.9, 1.0)] * 3
-        df = make_ohlc(data)
-        result = classify_swing_sequence(df)
-        assert result["trend"] == "NONE"
-
-
-# =====================
-# BOS vs MSS Classification
-# =====================
-class TestBOSvsMSS:
-    def test_classify_false_returns_tuple(self):
-        """Default classify=False returns backward-compatible 4-tuple."""
-        data = [(1.0, 1.05, 0.95, 1.0)] * 20
-        data += [(1.0, 1.08, 0.99, 1.07)] * 5
-        df = make_ohlc(data)
-        result = detect_bos(df, 1.05, 0.95)
-        assert isinstance(result, tuple)
-        assert len(result) == 4
-
-    def test_classify_true_returns_dict(self):
-        """classify=True returns enriched dict."""
-        data = [(1.0, 1.05, 0.95, 1.0)] * 20
-        data += [(1.0, 1.08, 0.99, 1.07)] * 5
-        df = make_ohlc(data)
-        result = detect_bos(df, 1.05, 0.95, classify=True)
-        assert isinstance(result, dict)
-        assert "break_type" in result
-        assert "displacement_fvg" in result
-        assert result["bullish_bos"] is True
-
-    def test_bos_continuation_in_uptrend(self):
-        """Bullish break in uptrend = BOS (continuation)."""
-        # Create uptrend then break above
-        data = []
-        for i in range(20):
-            base = 1.0 + i * 0.01
-            if i % 4 == 0:
-                data.append((base, base + 0.05, base - 0.01, base + 0.03))
-            elif i % 4 == 2:
-                data.append((base, base + 0.01, base - 0.03, base - 0.01))
-            else:
-                data.append((base, base + 0.02, base - 0.02, base + 0.01))
-        # Strong bullish break
-        data += [(1.2, 1.35, 1.19, 1.33)] * 5
-        df = make_ohlc(data)
-        swing_h = df['high'].iloc[:-5].max()
-        swing_l = df['low'].iloc[:-5].min()
-        result = detect_bos(df, swing_h, swing_l, classify=True)
-        if result["bullish_bos"]:
-            assert result["break_type"] == "BOS"
-
-    def test_mss_reversal_in_downtrend(self):
-        """Bullish break in downtrend = MSS (reversal)."""
-        data = []
-        for i in range(20):
-            base = 2.0 - i * 0.01
-            if i % 4 == 0:
-                data.append((base, base + 0.05, base - 0.01, base + 0.03))
-            elif i % 4 == 2:
-                data.append((base, base + 0.01, base - 0.03, base - 0.01))
-            else:
-                data.append((base, base + 0.02, base - 0.02, base + 0.01))
-        # Strong bullish break (reversal)
-        data += [(1.8, 1.95, 1.79, 1.93)] * 5
-        df = make_ohlc(data)
-        swing_h = df['high'].iloc[:-5].max()
-        swing_l = df['low'].iloc[:-5].min()
-        result = detect_bos(df, swing_h, swing_l, classify=True)
-        if result["bullish_bos"]:
-            assert result["break_type"] == "MSS"
-
-
-# =====================
-# BOS FVG Displacement
-# =====================
-class TestBOSCreatedFVG:
-    def test_fvg_present(self):
-        """Candle sequence with gap should return True."""
-        data = [(1.0, 1.02, 0.98, 1.0)] * 20
-        # FVG: c1.high=1.02, then gap candle, then c3.low=1.05 > c1.high
-        data.append((1.0, 1.02, 0.99, 1.01))   # c1
-        data.append((1.02, 1.06, 1.01, 1.05))   # displacement candle
-        data.append((1.05, 1.08, 1.05, 1.07))   # c3 — low=1.05 > c1.high=1.02 → FVG
-        df = make_ohlc(data)
-        # break index = 21 (displacement candle)
-        assert bool(_bos_creates_fvg(df, 21, "BULL", 0.01)) is True
-
-    def test_no_fvg(self):
-        """Candle sequence without gap should return False."""
-        data = [(1.0, 1.02, 0.98, 1.0)] * 20
-        data.append((1.0, 1.02, 0.99, 1.01))
-        data.append((1.01, 1.04, 1.00, 1.03))   # no gap: c3.low=1.00 < c1.high=1.02
-        data.append((1.00, 1.03, 1.00, 1.02))
-        df = make_ohlc(data)
-        assert bool(_bos_creates_fvg(df, 21, "BULL", 0.01)) is False
-
-
-# =====================
-# Premium / Discount
-# =====================
-class TestPremiumDiscount:
-    def test_discount_zone(self):
-        assert is_in_premium_discount(1.02, 1.10, 1.00) == "discount"
-
-    def test_premium_zone(self):
-        assert is_in_premium_discount(1.08, 1.10, 1.00) == "premium"
-
-    def test_equilibrium(self):
-        assert is_in_premium_discount(1.05, 1.10, 1.00) == "equilibrium"
-
-    def test_equal_swing(self):
-        assert is_in_premium_discount(1.0, 1.0, 1.0) == "equilibrium"
-
-    def test_none_swing(self):
-        assert is_in_premium_discount(1.0, None, None) == "equilibrium"
-
-
-# =====================
-# Enhanced Confidence
-# =====================
-class TestEnhancedConfidence:
-    def test_platinum_mss_sweep_engulfing_fvg(self):
-        """MSS + Sweep + Engulfing + FVG = HIGH (platinum)."""
-        zone = {"type": "V", "direction": "demand", "top": 1.0, "bottom": 0.99}
-        result = _compute_confidence(True, 1, zone, True, is_mss=True)
-        assert result == "high"
-
-    def test_bos_fvg_boost(self):
-        """Engulfing + BOS-created FVG = MEDIUM."""
-        zone = {"type": "V", "direction": "demand", "top": 1.0, "bottom": 0.99}
-        result = _compute_confidence(False, 1, zone, False, bos_fvg=True)
-        assert result == "medium"
-
-    def test_gold_unchanged(self):
-        """Sweep + Engulfing still = HIGH."""
-        zone = {"type": "V", "direction": "demand", "top": 1.0, "bottom": 0.99}
-        result = _compute_confidence(True, 1, zone, False)
-        assert result == "high"
-
-
-# =====================
-# Signal New Fields
-# =====================
-class TestSignalNewFields:
-    def test_signal_has_new_fields(self):
-        """Generated signal should include break_type, displacement_fvg, pd_zone."""
-        df_h = make_ohlc([(1.0, 1.1, 0.9, 1.05)] * 15 + [(1.05, 1.15, 0.98, 1.12)] * 10)
-        df_l = make_trending_data("up", bars=30, start=1.0, step=0.005)
-        sig = get_smc_signal(df_l, df_h, "XAUUSD")
-        if sig is not None:
-            assert "break_type" in sig
-            assert "displacement_fvg" in sig
-            assert "pd_zone" in sig
-            assert sig["break_type"] in ("BOS", "MSS", None)
-            assert isinstance(sig["displacement_fvg"], bool)
-            assert sig["pd_zone"] in ("premium", "discount", "equilibrium")

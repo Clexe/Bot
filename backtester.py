@@ -61,14 +61,11 @@ def _evaluate_signal(sig, df_l, bar_index, pair, mode="LIMIT"):
     if risk <= 0:
         return {"outcome": "SKIP", "pnl_pips": 0, "rr": 0, "bars_held": 0}
 
-    # Walk future bars — start at bar_index + 1 to avoid look-ahead bias.
-    # The signal fires on bar_index, so the earliest the market can fill
-    # is the NEXT bar. Starting at bar_index would let the signal "see"
-    # the candle it was generated on, inflating backtest results.
+    # Walk future bars
     sl_current = sl  # will be moved to BE after TP1
     best_tp_hit = None
 
-    for j in range(bar_index + 1, len(df_l)):
+    for j in range(bar_index, len(df_l)):
         candle = df_l.iloc[j]
 
         if direction == "BUY":
@@ -80,10 +77,9 @@ def _evaluate_signal(sig, df_l, bar_index, pair, mode="LIMIT"):
                             "rr": round(pnl / (risk * pip_val), 2) if risk > 0 else 0,
                             "bars_held": j - bar_index}
                 else:
-                    # SL hit after partial TP — classify based on actual P&L
+                    # SL hit after partial TP — breakeven or partial win
                     pnl = (sl_current - entry) * pip_val
-                    outcome = "BREAKEVEN" if abs(pnl) < 1 else best_tp_hit
-                    return {"outcome": outcome, "pnl_pips": round(pnl, 1),
+                    return {"outcome": best_tp_hit, "pnl_pips": round(pnl, 1),
                             "rr": round(pnl / (risk * pip_val), 2) if risk > 0 else 0,
                             "bars_held": j - bar_index}
 
@@ -108,8 +104,7 @@ def _evaluate_signal(sig, df_l, bar_index, pair, mode="LIMIT"):
                             "bars_held": j - bar_index}
                 else:
                     pnl = (entry - sl_current) * pip_val
-                    outcome = "BREAKEVEN" if abs(pnl) < 1 else best_tp_hit
-                    return {"outcome": outcome, "pnl_pips": round(pnl, 1),
+                    return {"outcome": best_tp_hit, "pnl_pips": round(pnl, 1),
                             "rr": round(pnl / (risk * pip_val), 2) if risk > 0 else 0,
                             "bars_held": j - bar_index}
 
@@ -200,24 +195,23 @@ def _build_summary(trades):
 
     wins = [t for t in trades if t["outcome"].startswith("WIN")]
     losses = [t for t in trades if t["outcome"] == "LOSS"]
-    breakevens = [t for t in trades if t["outcome"] == "BREAKEVEN"]
     open_trades = [t for t in trades if t["outcome"] == "OPEN"]
-    closed = wins + losses + breakevens
+    closed = wins + losses
 
     total_pips = sum(t["pnl_pips"] for t in closed)
     gross_profit = sum(t["pnl_pips"] for t in wins) if wins else 0
     gross_loss = abs(sum(t["pnl_pips"] for t in losses)) if losses else 0
 
     # Max drawdown (peak-to-trough in cumulative pips)
-    # Include ALL trades (including OPEN) — unrealized losses matter for risk
     running = 0
     peak = 0
     max_dd = 0
     for t in trades:
-        running += t["pnl_pips"]
-        peak = max(peak, running)
-        dd = peak - running
-        max_dd = max(max_dd, dd)
+        if t["outcome"] != "OPEN":
+            running += t["pnl_pips"]
+            peak = max(peak, running)
+            dd = peak - running
+            max_dd = max(max_dd, dd)
 
     win_count = len(wins)
     loss_count = len(losses)

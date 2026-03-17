@@ -180,19 +180,6 @@ BYBIT_INTERVALS = {
     "1W": "W",
 }
 
-# Adaptive candle limits for Bybit (API max=1000).
-# Higher TFs need deeper history for zone discovery;
-# lower TFs need less since each candle = less time.
-BYBIT_CANDLE_LIMITS = {
-    "M5": 200,
-    "M15": 200,
-    "M30": 200,
-    "H1": 200,
-    "H4": 200,
-    "1D": 365,
-    "1W": 200,
-}
-
 # =====================
 # SIGNAL & SCANNER SETTINGS
 # =====================
@@ -225,6 +212,7 @@ USE_PREMIUM_DISCOUNT_FILTER = False  # Disabled until signals are flowing; pd_zo
 REQUIRE_INDUCEMENT_SWEEP = False  # When True, require liquidity sweep before entry (hard gate)
 REQUIRE_BOS_FVG = False           # When True, BOS without FVG creation is rejected (hard gate)
 KILL_ZONE_MODE = False            # When True, restrict forex signals to London/NY open kill zones
+RATE_LIMIT_BURST = 5
 
 # =====================
 # MARKET REGIME SETTINGS

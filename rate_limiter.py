@@ -18,27 +18,21 @@ class RateLimiter:
         self._lock = asyncio.Lock()
 
     async def acquire(self):
-        """Wait until a token is available, then consume it.
+        """Wait until a token is available, then consume it."""
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(self._max_tokens, self._tokens + elapsed * self._rate)
+            self._last_refill = now
 
-        The lock is released before sleeping so other coroutines aren't
-        blocked while we wait for token replenishment.
-        """
-        while True:
-            async with self._lock:
-                now = time.monotonic()
-                elapsed = now - self._last_refill
-                self._tokens = min(self._max_tokens, self._tokens + elapsed * self._rate)
-                self._last_refill = now
-
-                if self._tokens >= 1:
-                    self._tokens -= 1
-                    return  # token acquired
-
+            if self._tokens < 1:
                 wait_time = (1 - self._tokens) / self._rate
-
-            # Sleep OUTSIDE the lock so other coroutines aren't serialized
-            logger.debug("Rate limiter: waiting %.2fs", wait_time)
-            await asyncio.sleep(wait_time)
+                logger.debug("Rate limiter: waiting %.2fs", wait_time)
+                await asyncio.sleep(wait_time)
+                self._tokens = 0
+                self._last_refill = time.monotonic()
+            else:
+                self._tokens -= 1
 
     async def send_message(self, bot, chat_id, text, **kwargs):
         """Send a message with rate limiting applied.

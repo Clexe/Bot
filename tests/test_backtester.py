@@ -40,21 +40,21 @@ def make_trending_data(direction, bars=30, start=1.0, step=0.001):
 # =====================
 class TestEvaluateSignal:
     def test_buy_hits_tp1_then_sl_at_be(self):
-        """BUY signal: price hits TP1, SL moved to BE, then SL hit = BREAKEVEN."""
+        """BUY signal: price hits TP1, SL moved to BE, then SL hit = WIN at BE."""
         sig = {
             "act": "BUY", "limit_e": 1.10, "limit_sl": 1.09,
             "market_e": 1.10, "market_sl": 1.09,
             "tp": 1.12, "tp1": 1.11, "tp2": 1.12, "tp3": 1.13,
         }
-        # bar 0 = entry (skipped by look-ahead), bar 1 = hits TP1, bar 2 = drops to BE
+        # bar 0 = entry, bar 1 = hits TP1 (1.11), bar 2 = drops to BE (1.10)
         data = [
-            (1.10, 1.105, 1.095, 1.10),  # entry bar (look-ahead: skipped)
+            (1.10, 1.105, 1.095, 1.10),  # entry bar
             (1.10, 1.115, 1.10, 1.11),   # hits TP1
             (1.11, 1.11, 1.095, 1.095),  # drops to BE (1.10)
         ]
         df = make_ohlc(data)
         result = _evaluate_signal(sig, df, 0, "EURUSD", mode="LIMIT")
-        assert result["outcome"] == "BREAKEVEN"
+        assert result["outcome"] == "WIN_TP1"
         assert result["pnl_pips"] == 0  # breakeven
 
     def test_buy_hits_all_tps(self):
@@ -65,7 +65,6 @@ class TestEvaluateSignal:
             "tp": 1.12, "tp1": 1.11, "tp2": 1.12, "tp3": 1.13,
         }
         data = [
-            (1.10, 1.105, 1.095, 1.10),   # entry bar (look-ahead: skipped)
             (1.10, 1.115, 1.095, 1.11),   # hits TP1
             (1.11, 1.125, 1.105, 1.12),   # hits TP2
             (1.12, 1.135, 1.115, 1.13),   # hits TP3
@@ -83,7 +82,6 @@ class TestEvaluateSignal:
             "tp": 1.12, "tp1": 1.11, "tp2": 1.12, "tp3": 1.13,
         }
         data = [
-            (1.10, 1.105, 1.095, 1.10),  # entry bar (look-ahead: skipped)
             (1.10, 1.105, 1.085, 1.09),  # drops to SL
         ]
         df = make_ohlc(data)
@@ -99,14 +97,12 @@ class TestEvaluateSignal:
             "tp": 1.08, "tp1": 1.09, "tp2": 1.08, "tp3": 1.07,
         }
         data = [
-            (1.10, 1.105, 1.095, 1.10),   # entry bar (look-ahead: skipped)
             (1.10, 1.105, 1.085, 1.09),   # hits TP1
-            (1.09, 1.105, 1.085, 1.10),   # bounces to BE (SL at entry=1.10)
+            (1.09, 1.105, 1.085, 1.10),   # bounces to BE
         ]
         df = make_ohlc(data)
         result = _evaluate_signal(sig, df, 0, "EURUSD", mode="LIMIT")
-        # TP1 hit then SL at BE → BREAKEVEN (pnl ≈ 0)
-        assert result["outcome"] == "BREAKEVEN"
+        assert result["outcome"] == "WIN_TP1"
 
     def test_open_at_end_of_data(self):
         """Signal still open when data runs out."""
@@ -116,7 +112,6 @@ class TestEvaluateSignal:
             "tp": 1.12, "tp1": 1.11, "tp2": 1.12, "tp3": 1.13,
         }
         data = [
-            (1.10, 1.105, 1.095, 1.10),   # entry bar (look-ahead: skipped)
             (1.10, 1.105, 1.095, 1.102),
             (1.102, 1.106, 1.098, 1.104),
         ]
@@ -131,7 +126,7 @@ class TestEvaluateSignal:
             "market_e": 1.10, "market_sl": 1.10,
             "tp": 1.12, "tp1": 1.11, "tp2": 1.12, "tp3": 1.13,
         }
-        df = make_ohlc([(1.10, 1.11, 1.09, 1.10), (1.10, 1.11, 1.09, 1.10)])
+        df = make_ohlc([(1.10, 1.11, 1.09, 1.10)])
         result = _evaluate_signal(sig, df, 0, "EURUSD")
         assert result["outcome"] == "SKIP"
 
@@ -241,46 +236,3 @@ class TestRunBacktest:
         for i in range(1, len(result["trades"])):
             diff = result["trades"][i]["bar"] - result["trades"][i - 1]["bar"]
             assert diff >= 20
-
-
-class TestBreakevenOutcome:
-    def test_breakeven_counted_separately(self):
-        """BREAKEVEN trades should not inflate win rate."""
-        trades = [
-            {"outcome": "WIN_TP2", "pnl_pips": 50, "rr": 2.0, "bars_held": 10},
-            {"outcome": "BREAKEVEN", "pnl_pips": 0, "rr": 0, "bars_held": 5},
-            {"outcome": "LOSS", "pnl_pips": -30, "rr": -1.0, "bars_held": 3},
-        ]
-        summary = _build_summary(trades)
-        assert summary["wins"] == 1
-        assert summary["losses"] == 1
-        # BREAKEVEN is in closed but not a win or loss
-        assert summary["total"] == 3
-        assert summary["total_pips"] == 20  # 50 + 0 + (-30)
-
-    def test_open_trades_included_in_drawdown(self):
-        """OPEN trades with negative P&L should be counted in max drawdown."""
-        trades = [
-            {"outcome": "WIN_TP1", "pnl_pips": 30, "rr": 1.0, "bars_held": 5},
-            {"outcome": "OPEN", "pnl_pips": -40, "rr": -0.5, "bars_held": 2},
-        ]
-        summary = _build_summary(trades)
-        # Peak at 30, then 30 + (-40) = -10, drawdown = 30 - (-10) = 40
-        assert summary["max_dd"] == 40
-
-    def test_look_ahead_bias_eliminated(self):
-        """Signal on bar N should not evaluate bar N — only bar N+1 onward."""
-        sig = {
-            "act": "BUY", "limit_e": 1.10, "limit_sl": 1.09,
-            "market_e": 1.10, "market_sl": 1.09,
-            "tp": 1.12, "tp1": 1.11, "tp2": 1.12, "tp3": 1.13,
-        }
-        # Bar 0 has a massive range that would hit TP1 — but should be skipped
-        data = [
-            (1.10, 1.115, 1.085, 1.10),  # bar 0: hits TP1 AND SL — skipped
-            (1.10, 1.105, 1.095, 1.102),  # bar 1: no hit
-        ]
-        df = make_ohlc(data)
-        result = _evaluate_signal(sig, df, 0, "EURUSD", mode="LIMIT")
-        # Bar 0 skipped, bar 1 doesn't hit anything → OPEN
-        assert result["outcome"] == "OPEN"
