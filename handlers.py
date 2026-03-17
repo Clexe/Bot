@@ -355,7 +355,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: broadcast a message to all users."""
     sender_id = str(update.effective_user.id)
     if sender_id != ADMIN_ID:
-        await update.message.reply_text("Unauthorized. This command is admin-only.")
         return
     if not context.args:
         await update.message.reply_text("Usage: /broadcast <message>")
@@ -384,7 +383,6 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: show user count and pair stats."""
     sender_id = str(update.effective_user.id)
     if sender_id != ADMIN_ID:
-        await update.message.reply_text("Unauthorized. This command is admin-only.")
         return
     users = await load_users_async()
     active_pairs = sum(len(u.get("pairs", [])) for u in users.values())
@@ -575,23 +573,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_symbols = text.replace(",", " ").replace("\n", " ").split()
         added = []
         skipped = []
-        MAX_PAIRS = 30  # prevent watchlist abuse
         for raw in raw_symbols:
-            # Normalize: strip slashes (users paste "BTC/USDT" from other platforms)
-            symbol = raw.strip().upper().replace("/", "")
+            symbol = raw.strip().upper()
             if not symbol:
                 continue
-            # Validate format: alphanumeric, 3-20 chars
-            if not symbol.isalnum() or len(symbol) < 3 or len(symbol) > 20:
-                skipped.append(f"{raw.strip().upper()} (invalid format)")
-                continue
-            if len(user["pairs"]) + len(added) >= MAX_PAIRS:
-                skipped.append(f"{symbol} (max {MAX_PAIRS} pairs reached)")
-                continue
-            if symbol in user["pairs"] or symbol in added:
+            if symbol in user["pairs"]:
                 skipped.append(f"{symbol} (already added)")
-            elif symbol.endswith("USDT") and len(symbol[:-4]) < 2:
-                skipped.append(f"{symbol} (invalid base)")
             elif symbol not in KNOWN_SYMBOLS and not symbol.endswith("USDT"):
                 skipped.append(f"{symbol} (unknown)")
             elif symbol.endswith("USDT") and symbol[:-4] in FOREX_BASES:

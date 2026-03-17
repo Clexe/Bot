@@ -14,17 +14,14 @@ def _calc_lot_size(risk_pips, pip_value, balance, risk_pct, size_multiplier=1.0)
     """
     if risk_pips <= 0 or balance <= 0 or risk_pct <= 0:
         return None
-    # pip_per_lot: USD P&L per pip per lot, varies by asset class
     if pip_value >= 10000:
-        pip_per_lot = 10.0    # Standard forex (EURUSD, GBPUSD)
+        pip_per_lot = 10.0    # Standard forex
     elif pip_value >= 100:
-        pip_per_lot = 100.0   # Sub-dollar crypto (XRP, ADA, DOGE)
-    elif pip_value >= 10:
-        pip_per_lot = 10.0    # Mid-cap crypto/metals (SOL, LINK, XAU)
+        pip_per_lot = 10.0    # JPY pairs
     elif pip_value >= 1:
-        pip_per_lot = 1.0     # Large-cap crypto (ETH, BNB)
+        pip_per_lot = 10.0    # Metals, indices
     else:
-        pip_per_lot = 0.1     # BTC (pip_value=0.1)
+        pip_per_lot = 1.0     # Crypto
     risk_amount = balance * risk_pct / 100
     lot = risk_amount / (risk_pips * pip_per_lot)
     lot *= size_multiplier
@@ -86,31 +83,21 @@ def format_signal_msg(sig, pair, mode, balance=0, risk_pct=1, pip_value=None,
 
     # Confidence + trigger info
     trigger_parts = []
-    # MSS/BOS badge
-    break_type = sig.get('break_type')
-    if break_type == "MSS":
-        trigger_parts.append("MSS")
-    elif break_type == "BOS":
-        trigger_parts.append("BOS")
     if sig.get('touch'):
         trigger_parts.append("TOUCH")
     if sig.get('sweep'):
         trigger_parts.append("SWEEP")
-    if sig.get('displacement_fvg'):
-        trigger_parts.append("FVG")
     trigger_tag = " | ".join(trigger_parts) if trigger_parts else ""
     trigger_line = f"\n{trigger_tag}" if trigger_tag else ""
 
-    # Regime + volume proxy + premium/discount context line
+    # Regime + volume proxy context line
     regime = sig.get('regime', '')
     vol_proxy = sig.get('volume_proxy', 0)
     vol_label = "HIGH" if vol_proxy >= 0.65 else "MED" if vol_proxy >= 0.4 else "LOW"
-    pd_zone = sig.get('pd_zone', '')
-    pd_tag = f" | {pd_zone.upper()}" if pd_zone and pd_zone != "equilibrium" else ""
     context_line = ""
     if regime:
         regime_short = regime.replace("TRENDING_", "T-").replace("RANGING", "RANGE")
-        context_line = f"\nRegime: {regime_short} | Vol: {vol_label}{pd_tag}"
+        context_line = f"\nRegime: {regime_short} | Vol: {vol_label}"
 
     return (
         f"{emoji} *SMC SIGNAL ({label})* [{confidence.upper()}]\n"
@@ -147,13 +134,9 @@ def should_send_signal(sent_signals, signal_key, sig, cooldown_sec):
     if not isinstance(last_info, dict):
         return True
 
-    time_since_last = current_time - last_info.get('time', 0)
-    time_elapsed = time_since_last > cooldown_sec
+    time_elapsed = (current_time - last_info.get('time', 0)) > cooldown_sec
     direction_changed = last_info.get('direction') != sig['act']
-    # Direction flip allowed after half-cooldown (prevents whipsaw in chop)
-    if direction_changed:
-        return time_since_last > (cooldown_sec * 0.5)
-    return time_elapsed
+    return time_elapsed or direction_changed
 
 
 def cleanup_old_signals(sent_signals):
