@@ -6,7 +6,7 @@ from pybit.unified_trading import HTTP
 from config import (
     DERIV_TOKEN, DERIV_APP_ID, BYBIT_KEY, BYBIT_SECRET,
     DERIV_SYMBOL_MAP, DERIV_KEYWORDS, DERIV_GRANULARITY, BYBIT_INTERVALS,
-    BYBIT_CANDLE_LIMITS, DERIV_CANDLE_COUNT, logger,
+    DERIV_CANDLE_COUNT, logger,
 )
 
 # Initialize Bybit client with larger connection pool to avoid overflow warnings
@@ -140,11 +140,6 @@ class DerivSession:
 _deriv_session = DerivSession(max_concurrent=5)
 
 
-async def shutdown_fetchers():
-    """Shutdown shared exchange sessions cleanly."""
-    await _deriv_session.close()
-
-
 def is_deriv_pair(clean_pair):
     """Determine if a symbol should be fetched from Deriv.
 
@@ -238,8 +233,7 @@ def _fetch_bybit(clean_pair, interval):
     try:
         tf = BYBIT_INTERVALS.get(interval, "15")
         category = _bybit_category(clean_pair)
-        limit = BYBIT_CANDLE_LIMITS.get(interval, 200)
-        resp = bybit.get_kline(category=category, symbol=clean_pair, interval=tf, limit=limit)
+        resp = bybit.get_kline(category=category, symbol=clean_pair, interval=tf, limit=100)
         if not resp or 'result' not in resp or not resp['result'].get('list'):
             logger.warning("Bybit empty response for %s", clean_pair)
             return pd.DataFrame()

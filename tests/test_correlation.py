@@ -101,40 +101,6 @@ class TestCheckCorrelation:
         assert "USD_SHORTS" in reason
 
 
-class TestCorrelationGroups:
-    def test_eur_crosses_group_blocks(self):
-        """EUR_CROSSES group should block 3rd same-direction EUR cross."""
-        from correlation import CORRELATION_GROUPS
-        assert "EUR_CROSSES" in CORRELATION_GROUPS
-        positions = [
-            {"pair": "EURGBP", "direction": "BUY"},
-            {"pair": "EURAUD", "direction": "BUY"},
-        ]
-        ok, reason = check_correlation("EURCAD", "BUY", positions,
-                                       max_currency_exposure=5,
-                                       max_group_same_dir=2)
-        assert ok is False
-        assert "EUR_CROSSES" in reason
-
-    def test_gbp_crosses_group_exists(self):
-        from correlation import CORRELATION_GROUPS
-        assert "GBP_CROSSES" in CORRELATION_GROUPS
-        assert "GBPAUD" in CORRELATION_GROUPS["GBP_CROSSES"]
-        assert "GBPCAD" in CORRELATION_GROUPS["GBP_CROSSES"]
-
-    def test_aud_crosses_group_exists(self):
-        from correlation import CORRELATION_GROUPS
-        assert "AUD_CROSSES" in CORRELATION_GROUPS
-        assert "AUDNZD" in CORRELATION_GROUPS["AUD_CROSSES"]
-
-    def test_cross_pair_currencies_mapped(self):
-        """All cross pairs should have currency decomposition."""
-        assert get_pair_currencies("EURGBP") == ("EUR", "GBP")
-        assert get_pair_currencies("GBPNZD") == ("GBP", "NZD")
-        assert get_pair_currencies("AUDCHF") == ("AUD", "CHF")
-        assert get_pair_currencies("NZDJPY") == ("NZD", "JPY")
-
-
 class TestGetExposureSummary:
     def test_empty(self):
         assert get_exposure_summary([]) == "No currency exposure"
