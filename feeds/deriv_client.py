@@ -8,6 +8,10 @@ class DerivClient:
         self.app_id = app_id
         self.ws = None
 
+    @property
+    def is_connected(self):
+        return self.ws is not None and not self.ws.closed
+
     async def connect(self):
         """Connect with auto-reconnect semantics."""
         while True:

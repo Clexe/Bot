@@ -6,6 +6,9 @@ from database.db import Database
 from database.schema import initialize_schema
 from delivery.scheduler import make_scheduler, process_delivery_queue
 from delivery.telegram_bot import TelegramDelivery
+from engine.scanner import run_scan_cycle
+from feeds.bybit_client import BybitClient
+from feeds.deriv_client import DerivClient
 from api.stats_server import make_app
 from bot.handlers import (
     start_command, mode_command, settf_command, sethtf_command,
@@ -31,10 +34,15 @@ async def start():
     await initialize_schema(db)
     logger.info("Database ready")
 
+    # ── Feed clients ──
+    bybit = BybitClient()
+    deriv = DerivClient(settings.deriv_app_id)
+
     # ── Delivery scheduler ──
     telegram_delivery = TelegramDelivery(settings.telegram_bot_token)
     scheduler = make_scheduler()
     scheduler.add_job(process_delivery_queue, 'interval', seconds=60, args=[db, telegram_delivery])
+    scheduler.add_job(run_scan_cycle, 'interval', seconds=120, args=[db, telegram_delivery, bybit, deriv])
     scheduler.add_job(alive_job, 'interval', minutes=10)
     scheduler.start()
 
