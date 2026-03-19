@@ -19,14 +19,14 @@ class Settings:
     """Runtime configuration sourced from Railway environment variables."""
 
     database_url: str = os.environ.get("DATABASE_URL", "")
-    deriv_api_key: str = os.environ.get("DERIV_API_KEY", "")
+    deriv_api_key: str = os.environ.get("DERIV_TOKEN", "")
     deriv_app_id: str = os.environ.get("DERIV_APP_ID", "")
     bybit_api_key: str = os.environ.get("BYBIT_API_KEY", "")
     bybit_api_secret: str = os.environ.get("BYBIT_API_SECRET", "")
     deepseek_api_key: str = os.environ.get("DEEPSEEK_API_KEY", "")
-    telegram_bot_token: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    telegram_bot_token: str = os.environ.get("TELEGRAM_TOKEN", "")
     telegram_channel_id: str = os.environ.get("TELEGRAM_CHANNEL_ID", "")
     paystack_secret_key: str = os.environ.get("PAYSTACK_SECRET_KEY", "")
-    admin_chat_ids: List[int] = tuple(int(x) for x in os.environ.get("ADMIN_CHAT_IDS", "").split(",") if x.strip())
+    admin_chat_ids: List[int] = tuple(int(x) for x in os.environ.get("ADMIN_ID", "").split(",") if x.strip())
 
 settings = Settings()
