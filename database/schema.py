@@ -1,12 +1,33 @@
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS users (
+    user_id BIGINT PRIMARY KEY,
+    settings JSONB DEFAULT '{}'::jsonb,
+    is_active BOOLEAN DEFAULT TRUE,
+    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS signal_history (
     id SERIAL PRIMARY KEY,
-    telegram_chat_id BIGINT UNIQUE NOT NULL,
-    tier VARCHAR(20) DEFAULT 'free',
-    paystack_customer_id VARCHAR(100),
-    created_at TIMESTAMP DEFAULT NOW(),
-    is_active BOOLEAN DEFAULT true,
-    is_banned BOOLEAN DEFAULT false
+    pair VARCHAR(20) NOT NULL,
+    direction VARCHAR(4) NOT NULL,
+    mode VARCHAR(10) NOT NULL,
+    entry_price DOUBLE PRECISION NOT NULL,
+    tp_price DOUBLE PRECISION NOT NULL,
+    sl_price DOUBLE PRECISION NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    outcome VARCHAR(10) DEFAULT 'OPEN',
+    close_price DOUBLE PRECISION,
+    closed_at TIMESTAMP,
+    pnl_pips DOUBLE PRECISION DEFAULT 0,
+    tp_stage INTEGER DEFAULT 0,
+    zone_type VARCHAR(10) DEFAULT '',
+    regime VARCHAR(20) DEFAULT '',
+    confidence VARCHAR(10) DEFAULT 'medium'
+);
+CREATE TABLE IF NOT EXISTS sent_signals (
+    signal_key VARCHAR(100) PRIMARY KEY,
+    price DOUBLE PRECISION NOT NULL,
+    direction VARCHAR(4) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS signals (
     id SERIAL PRIMARY KEY,
@@ -50,6 +71,8 @@ CREATE TABLE IF NOT EXISTS bot_settings (
 CREATE TABLE IF NOT EXISTS errors (
     id SERIAL PRIMARY KEY, error_type VARCHAR(50), error_message TEXT, pair VARCHAR(20), logged_at TIMESTAMP DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_signal_history_pair ON signal_history(pair, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_signal_history_outcome ON signal_history(outcome);
 INSERT INTO bot_settings (key, value) VALUES
 ('min_signal_score', '7'), ('bot_paused', 'false'), ('paused_pairs', '')
 ON CONFLICT (key) DO NOTHING;
