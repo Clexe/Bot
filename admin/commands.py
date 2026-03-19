@@ -1,4 +1,4 @@
-from signalix.config import settings
+from config import settings
 
 def is_admin(chat_id: int) -> bool:
     """Check admin authorization by configured chat IDs."""

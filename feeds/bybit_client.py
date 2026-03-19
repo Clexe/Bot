@@ -1,5 +1,5 @@
 import asyncio, aiohttp, json, websockets
-from signalix.config import BYBIT_REST_URL, BYBIT_WS_URL, CRYPTO_PAIRS, TF_MAP_BYBIT
+from config import BYBIT_REST_URL, BYBIT_WS_URL, CRYPTO_PAIRS, TF_MAP_BYBIT
 
 class BybitClient:
     """Bybit V5 REST and websocket market data client."""

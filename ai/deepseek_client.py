@@ -1,5 +1,5 @@
 import asyncio, os, requests
-from signalix.utils.logger import get_logger
+from utils.logger import get_logger
 logger = get_logger(__name__)
 
 async def generate_rationale(signal_data: dict) -> str:

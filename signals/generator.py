@@ -1,6 +1,6 @@
 from datetime import datetime
-from signalix.strategy.detectors import detect_kill_zone
-from signalix.strategy.scoring import score_setup
+from strategy.detectors import detect_kill_zone
+from strategy.scoring import score_setup
 
 async def generate_signal(pair: str, direction: str, trade_levels: dict, context: dict):
     """Assemble final signal dictionary if all hard-gate conditions pass."""

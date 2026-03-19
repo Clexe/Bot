@@ -1,5 +1,5 @@
 import asyncio, json, websockets
-from signalix.config import DERIV_WS_URL, FOREX_PAIRS
+from config import DERIV_WS_URL, FOREX_PAIRS
 
 class DerivClient:
     """Deriv websocket client for forex candle streaming and history retrieval."""

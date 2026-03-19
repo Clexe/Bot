@@ -1,4 +1,4 @@
-from signalix.utils.helpers import calculate_rr, in_round_number
+from utils.helpers import calculate_rr, in_round_number
 
 async def compute_trade_levels(direction: str, entry: float, sweep_low: float, sweep_high: float, tp_candidates: list):
     """Return entry/SL/TP levels with round-number and minimum RR handling."""
