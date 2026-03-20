@@ -191,7 +191,7 @@ async def run_scan_cycle(db, telegram, bybit, deriv):
         # ── Check kill zone ──
         now_utc = datetime.utcnow()
         in_kz, kz_name = await detect_kill_zone(now_utc)
-        if not in_kz or kz_name not in {"London", "New York"}:
+        if not in_kz or kz_name not in {"London", "New York", "New York PM"}:
             logger.debug("Outside kill zone (%s) — skipping scan", kz_name or "none")
             return
 
