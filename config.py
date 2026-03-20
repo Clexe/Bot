@@ -69,3 +69,77 @@ KNOWN_SYMBOLS = {
     "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V",
     "JUMP10", "JUMP25", "JUMP50", "JUMP75", "JUMP100",
 }
+
+# =====================
+# DERIV SYMBOL MAPPING (full)
+# =====================
+DERIV_SYMBOL_MAP = {
+    "XAUUSD": "frxXAUUSD", "XAGUSD": "frxXAGUSD",
+    "EURUSD": "frxEURUSD", "GBPUSD": "frxGBPUSD",
+    "USDJPY": "frxUSDJPY", "AUDUSD": "frxAUDUSD",
+    "NZDUSD": "frxNZDUSD", "USDCAD": "frxUSDCAD", "USDCHF": "frxUSDCHF",
+    "EURGBP": "frxEURGBP", "EURJPY": "frxEURJPY", "GBPJPY": "frxGBPJPY",
+    "CADJPY": "frxCADJPY", "CHFJPY": "frxCHFJPY",
+    "EURAUD": "frxEURAUD", "EURCAD": "frxEURCAD", "EURCHF": "frxEURCHF", "EURNZD": "frxEURNZD",
+    "GBPAUD": "frxGBPAUD", "GBPCAD": "frxGBPCAD", "GBPCHF": "frxGBPCHF", "GBPNZD": "frxGBPNZD",
+    "NZDCAD": "frxNZDCAD", "NZDCHF": "frxNZDCHF", "NZDJPY": "frxNZDJPY",
+    "AUDNZD": "frxAUDNZD", "AUDJPY": "frxAUDJPY",
+    # Volatility Indices
+    "V75": "R_75", "V10": "R_10", "V25": "R_25", "V50": "R_50", "V100": "R_100",
+    "V75_1S": "1HZ75V", "V10_1S": "1HZ10V", "V25_1S": "1HZ25V",
+    "V50_1S": "1HZ50V", "V100_1S": "1HZ100V",
+}
+
+DERIV_KEYWORDS = [
+    "XAU", "XAG", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF",
+    "R_", "V75", "V10", "V25", "V50", "V100",
+    "1S", "1HZ", "FRX", "BOOM", "CRASH", "STEP", "JUMP",
+]
+
+ALWAYS_OPEN_KEYS = [
+    "BTC", "ETH", "SOL", "USDT", "R_",
+    "V75", "V10", "V25", "V50", "V100",
+    "1HZ", "BOOM", "CRASH", "JUMP", "STEP",
+]
+
+# Deriv granularity mapping
+DERIV_GRANULARITY = {
+    "M1": 60, "M5": 300, "M15": 900, "M30": 1800,
+    "H1": 3600, "H4": 14400, "D": 86400, "1D": 86400, "W": 604800, "1W": 604800,
+}
+
+# Pip value: symbols containing these keys use 100 pips/unit (JPY, metals, indices, synthetics)
+HIGH_PIP_SYMBOLS = [
+    "JPY", "V75", "V10", "V25", "V50", "V100",
+    "R_", "BOOM", "CRASH", "STEP", "JUMP", "1HZ",
+    "XAU", "XAG",
+]
+
+# =====================
+# SIGNAL & SCANNER SETTINGS
+# =====================
+SIGNAL_TTL = 7200
+SCAN_LOOP_INTERVAL = 60
+SCAN_ERROR_INTERVAL = 10
+SIGNAL_MAX_AGE_HOURS = 24
+AUTO_WIN_PIPS = 100
+BE_BUFFER_PIPS = 2
+
+# Adaptive scan interval per user timeframe
+ADAPTIVE_SCAN_INTERVALS = {
+    "M5": 30, "M15": 60, "M30": 90, "H1": 120,
+}
+
+# Confidence-based position sizing
+CONFIDENCE_SIZE_MULTIPLIERS = {
+    "high": 1.5, "medium": 1.0, "low": 0.5,
+}
+
+
+def get_pip_value(pair: str) -> float:
+    """Return pip value multiplier for a pair."""
+    clean = pair.upper()
+    if any(k in clean for k in HIGH_PIP_SYMBOLS):
+        return 100.0
+    return 10000.0
+
