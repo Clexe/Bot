@@ -145,38 +145,23 @@ async def detect_kill_zone(current_time_utc) -> dict:
     """Return kill-zone info for both Precision and Flow engines."""
     t = current_time_utc.time() if hasattr(current_time_utc, "time") else current_time_utc
 
-    precision_active = False
-    flow_active = False
-    session = None
-
-    if time(7, 30) <= t <= time(10, 30):
-        precision_active = True
-        session = "London"
-    if time(12, 30) <= t <= time(15, 30):
-        precision_active = True
-        session = "New York"
-    if time(17, 30) <= t <= time(20, 30):
-        precision_active = True
-        session = "New York PM"
+    # Both engines active 24/7 — session label is for display only
+    session = "Off-Hours"
 
     if time(7, 0) <= t <= time(11, 0):
-        flow_active = True
-        if not session:
-            session = "London"
-    if time(12, 0) <= t <= time(16, 0):
-        flow_active = True
-        if not session:
-            session = "New York"
-    if time(17, 30) <= t <= time(20, 30):
-        flow_active = True
-        if not session:
-            session = "New York PM"
+        session = "London"
+    elif time(12, 0) <= t <= time(16, 0):
+        session = "New York"
+    elif time(17, 0) <= t <= time(21, 0):
+        session = "New York PM"
+    elif time(0, 0) <= t <= time(7, 0):
+        session = "Asian"
 
     return {
-        "precision_active": precision_active,
-        "flow_active": flow_active,
+        "precision_active": True,
+        "flow_active": True,
         "session": session,
-        "active": precision_active or flow_active,
+        "active": True,
     }
 
 
