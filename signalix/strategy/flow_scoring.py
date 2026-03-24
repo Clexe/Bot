@@ -53,7 +53,7 @@ async def score_flow_setup(context: dict, db) -> dict:
 
     # Read minimum score from bot_settings
     min_row = await db.fetchrow("SELECT value FROM bot_settings WHERE key='min_flow_score'")
-    min_score = int(min_row["value"]) if min_row else 6
+    min_score = int(min_row["value"]) if min_row else 5
 
     passed = score >= min_score
 

@@ -149,25 +149,25 @@ async def detect_kill_zone(current_time_utc) -> dict:
     flow_active = False
     session = None
 
-    if time(8, 0) <= t <= time(10, 0):
+    if time(7, 30) <= t <= time(10, 30):
         precision_active = True
         session = "London"
-    if time(13, 0) <= t <= time(15, 0):
+    if time(12, 30) <= t <= time(15, 30):
         precision_active = True
         session = "New York"
-    if time(18, 0) <= t <= time(20, 0):
+    if time(17, 30) <= t <= time(20, 30):
         precision_active = True
         session = "New York PM"
 
-    if time(7, 30) <= t <= time(10, 30):
+    if time(7, 0) <= t <= time(11, 0):
         flow_active = True
         if not session:
             session = "London"
-    if time(12, 30) <= t <= time(15, 30):
+    if time(12, 0) <= t <= time(16, 0):
         flow_active = True
         if not session:
             session = "New York"
-    if time(18, 0) <= t <= time(20, 0):
+    if time(17, 30) <= t <= time(20, 30):
         flow_active = True
         if not session:
             session = "New York PM"

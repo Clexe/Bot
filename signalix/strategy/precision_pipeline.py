@@ -81,7 +81,7 @@ async def run_precision_pipeline(pair: str, candles: dict, db) -> dict:
 
     fresh_poi = None
     for ob in h4_obs:
-        if ob["validity_status"] == "valid" and ob["touch_count"] == 0:
+        if ob["validity_status"] == "valid" and ob["touch_count"] <= 1:
             if (direction == "LONG" and ob["ob_type"] == "bullish") or \
                (direction == "SHORT" and ob["ob_type"] == "bearish"):
                 fresh_poi = ob
@@ -112,8 +112,8 @@ async def run_precision_pipeline(pair: str, candles: dict, db) -> dict:
     m15_candles = candles.get("M15", [])
 
     judas = await detect_liquidity_sweep(m15_candles, asian_levels)
-    if not judas["detected"] or not judas.get("fvg_created"):
-        await _log_rejection(db, pair, direction, 0, 5, "No Judas Swing with FVG")
+    if not judas["detected"]:
+        await _log_rejection(db, pair, direction, 0, 5, "No Judas Swing detected")
         return {"status": "rejected", "gate": 5, "reason": "No Judas Swing detected"}
 
     # ── GATE 6: M15 CHoCH with displacement confirmed ──

@@ -30,11 +30,14 @@ async def score_precision_setup(context: dict, db) -> dict:
     else:
         breakdown["htf_storyline"] = 0
 
-    # POI is fresh (zero touches) → 2 points
+    # POI is fresh (zero touches) → 2 points, 1 touch → 1 point
     poi_touch_count = context.get("poi_touch_count", 99)
     if poi_touch_count == 0:
         score += 2
         breakdown["poi_fresh"] = 2
+    elif poi_touch_count == 1:
+        score += 1
+        breakdown["poi_fresh"] = 1
     else:
         breakdown["poi_fresh"] = 0
 
@@ -90,7 +93,7 @@ async def score_precision_setup(context: dict, db) -> dict:
 
     # Read minimum score from bot_settings
     min_row = await db.fetchrow("SELECT value FROM bot_settings WHERE key='min_precision_score'")
-    min_score = int(min_row["value"]) if min_row else 10
+    min_score = int(min_row["value"]) if min_row else 8
 
     passed = score >= min_score
 
