@@ -1,33 +1,112 @@
 import os
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
+# ─── WebSocket / REST URLs ───────────────────────────────────────────────────
 DERIV_WS_URL = "wss://ws.binaryws.com/websockets/v3"
 BYBIT_REST_URL = "https://api.bybit.com"
 BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
 
-FOREX_PAIRS = ["EURUSD", "GBPUSD", "XAUUSD", "USDJPY"]
-CRYPTO_PAIRS = ["BTCUSDT", "ETHUSDT"]
-TIMEFRAMES = ["M", "W", "D", "H4", "H1", "M15", "M5"]
+# ─── Pairs ───────────────────────────────────────────────────────────────────
+FOREX_PAIRS: List[str] = ["EURUSD", "GBPUSD", "XAUUSD", "USDJPY"]
+CRYPTO_PAIRS: List[str] = ["BTCUSDT", "ETHUSDT"]
+ALL_PAIRS: List[str] = FOREX_PAIRS + CRYPTO_PAIRS
 
-TF_MAP_BYBIT: Dict[str, str] = {
-    "M1": "1", "M5": "5", "M15": "15", "H1": "60", "H4": "240", "D": "D", "W": "W", "M": "M"
+PAIR_CONFIG: Dict[str, dict] = {
+    "XAUUSD":  {"sl_buffer_pips": 3, "precision_all_layers": True,  "cot": True},
+    "XAGUSD":  {"sl_buffer_pips": 5, "precision_all_layers": True,  "cot": True},
+    "EURUSD":  {"sl_buffer_pips": 2, "precision_all_layers": False, "cot": False},
+    "GBPUSD":  {"sl_buffer_pips": 3, "precision_all_layers": False, "cot": False},
+    "USDJPY":  {"sl_buffer_pips": 2, "precision_all_layers": False, "cot": False},
+    "BTCUSDT": {"sl_buffer_pips": 0, "precision_all_layers": False, "cot": False},
+    "ETHUSDT": {"sl_buffer_pips": 0, "precision_all_layers": False, "cot": False},
 }
 
+# ─── Timeframes ──────────────────────────────────────────────────────────────
+TIMEFRAMES: List[str] = ["M", "W", "D", "H4", "H1", "M15", "M5"]
+
+TF_MAP_BYBIT: Dict[str, str] = {
+    "M1": "1", "M5": "5", "M15": "15", "H1": "60",
+    "H4": "240", "D": "D", "W": "W", "M": "M",
+}
+
+TF_MAP_DERIV: Dict[str, int] = {
+    "M1": 60, "M5": 300, "M15": 900, "H1": 3600,
+    "H4": 14400, "D": 86400, "W": 604800, "M": 2592000,
+}
+
+CANDLE_REQUIREMENTS: Dict[str, int] = {
+    "Monthly": 50, "Weekly": 100, "Daily": 100,
+    "H4": 100, "H1": 100, "M15": 100, "M5": 50,
+}
+
+# ─── Kill Zone Schedule ─────────────────────────────────────────────────────
+SCAN_SCHEDULE: Dict[str, dict] = {
+    "precision": {
+        "interval_minutes": 15,
+        "active_during_kill_zones_only": True,
+        "kill_zones": [
+            ("08:00", "10:00"),
+            ("13:00", "15:00"),
+            ("18:00", "20:00"),
+        ],
+    },
+    "flow": {
+        "interval_minutes": 5,
+        "active_during_kill_zones_only": True,
+        "kill_zones": [
+            ("07:30", "10:30"),
+            ("12:30", "15:30"),
+            ("18:00", "20:00"),
+        ],
+    },
+    "cot_refresh": {"day": "sunday", "time": "18:00"},
+    "health_check": {"interval_minutes": 10},
+}
+
+# ─── Signal Tier Rules ──────────────────────────────────────────────────────
+PRECISION_TIER_RULES: Dict[str, dict] = {
+    "free":  {"min_score": 14, "delay_minutes": 60},
+    "basic": {"min_score": 12, "delay_minutes": 0},
+    "pro":   {"min_score": 10, "delay_minutes": 0},
+    "elite": {"min_score": 10, "delay_minutes": 0},
+}
+
+FLOW_TIER_RULES: Dict[str, dict] = {
+    "free":  None,
+    "basic": {"min_score": 8, "delay_minutes": 0},
+    "pro":   {"min_score": 6, "delay_minutes": 0},
+    "elite": {"min_score": 6, "delay_minutes": 0},
+}
+
+# ─── Environment Variables ──────────────────────────────────────────────────
+DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
+DERIV_API_KEY: str = os.environ.get("DERIV_TOKEN", os.environ.get("DERIV_API_KEY", ""))
+DERIV_APP_ID: str = os.environ.get("DERIV_APP_ID", "")
+BYBIT_API_KEY: str = os.environ.get("BYBIT_API_KEY", "")
+BYBIT_API_SECRET: str = os.environ.get("BYBIT_API_SECRET", "")
+DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
+TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_TOKEN", os.environ.get("TELEGRAM_BOT_TOKEN", ""))
+TELEGRAM_CHANNEL_ID: str = os.environ.get("TELEGRAM_CHANNEL_ID", "")
+PAYSTACK_SECRET_KEY: str = os.environ.get("PAYSTACK_SECRET_KEY", "")
+ADMIN_CHAT_IDS: Tuple[int, ...] = tuple(
+    int(x) for x in os.environ.get("ADMIN_ID", os.environ.get("ADMIN_CHAT_IDS", "")).split(",") if x.strip()
+)
+
+# ─── Settings dataclass (backwards compat with main's style) ────────────────
 @dataclass(frozen=True)
 class Settings:
     """Runtime configuration sourced from Railway environment variables."""
-
-    database_url: str = os.environ.get("DATABASE_URL", "")
-    deriv_api_key: str = os.environ.get("DERIV_TOKEN", "")
-    deriv_app_id: str = os.environ.get("DERIV_APP_ID", "")
-    bybit_api_key: str = os.environ.get("BYBIT_API_KEY", "")
-    bybit_api_secret: str = os.environ.get("BYBIT_API_SECRET", "")
-    deepseek_api_key: str = os.environ.get("DEEPSEEK_API_KEY", "")
-    telegram_bot_token: str = os.environ.get("TELEGRAM_TOKEN", "")
-    telegram_channel_id: str = os.environ.get("TELEGRAM_CHANNEL_ID", "")
-    paystack_secret_key: str = os.environ.get("PAYSTACK_SECRET_KEY", "")
-    admin_chat_ids: List[int] = tuple(int(x) for x in os.environ.get("ADMIN_ID", "").split(",") if x.strip())
+    database_url: str = DATABASE_URL
+    deriv_api_key: str = DERIV_API_KEY
+    deriv_app_id: str = DERIV_APP_ID
+    bybit_api_key: str = BYBIT_API_KEY
+    bybit_api_secret: str = BYBIT_API_SECRET
+    deepseek_api_key: str = DEEPSEEK_API_KEY
+    telegram_bot_token: str = TELEGRAM_BOT_TOKEN
+    telegram_channel_id: str = TELEGRAM_CHANNEL_ID
+    paystack_secret_key: str = PAYSTACK_SECRET_KEY
+    admin_chat_ids: Tuple[int, ...] = ADMIN_CHAT_IDS
 
 settings = Settings()
 
@@ -108,7 +187,7 @@ DERIV_GRANULARITY = {
     "H1": 3600, "H4": 14400, "D": 86400, "1D": 86400, "W": 604800, "1W": 604800,
 }
 
-# Pip value: symbols containing these keys use 100 pips/unit (JPY, metals, indices, synthetics)
+# Pip value: symbols containing these keys use 100 pips/unit
 HIGH_PIP_SYMBOLS = [
     "JPY", "V75", "V10", "V25", "V50", "V100",
     "R_", "BOOM", "CRASH", "STEP", "JUMP", "1HZ",
@@ -142,4 +221,3 @@ def get_pip_value(pair: str) -> float:
     if any(k in clean for k in HIGH_PIP_SYMBOLS):
         return 100.0
     return 10000.0
-

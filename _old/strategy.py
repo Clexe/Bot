@@ -228,9 +228,6 @@ def mark_freshness(zones, df):
             nz_mid = (nz["top"] + nz["bottom"]) / 2
             buf = max(nz_width * 0.05, nz_mid * 0.0002)
             for j in range(start_check, freshness_end):
-            zone_mid = (nz["top"] + nz["bottom"]) / 2
-            buf = zone_mid * 0.001
-            for j in range(start_check, len(df)):
                 candle = df.iloc[j]
                 wick_touches = (candle['low'] <= nz["top"] + buf
                                 and candle['high'] >= nz["bottom"] - buf)
