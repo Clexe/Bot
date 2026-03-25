@@ -170,6 +170,28 @@ ON CONFLICT (key) DO NOTHING;
 """
 
 
+MIGRATIONS_SQL = """
+-- Add signal_type column to signals if missing (needed for precision/flow filtering)
+DO $$ BEGIN
+    ALTER TABLE signals ADD COLUMN signal_type VARCHAR(20) NOT NULL DEFAULT 'precision';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+-- Add engine_type column to rejected_setups if missing
+DO $$ BEGIN
+    ALTER TABLE rejected_setups ADD COLUMN engine_type VARCHAR(20);
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+-- Add gate_failed column to rejected_setups if missing
+DO $$ BEGIN
+    ALTER TABLE rejected_setups ADD COLUMN gate_failed INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+"""
+
+
 async def initialize_schema(db):
-    """Create all required tables and seed default settings."""
+    """Create all required tables, seed default settings, and run migrations."""
     await db.execute(SCHEMA_SQL)
+    await db.execute(MIGRATIONS_SQL)
