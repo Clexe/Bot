@@ -1,19 +1,15 @@
-"""Token bucket rate limiter for Telegram API calls.
-
-Telegram allows ~30 messages/sec globally. This limiter handles the global limit.
-Ported from _old/rate_limiter.py.
-"""
-
 import asyncio
 import time
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
-
-RATE_LIMIT_MESSAGES_PER_SECOND = 25
+from config import RATE_LIMIT_MESSAGES_PER_SECOND, logger
 
 
 class RateLimiter:
+    """Token bucket rate limiter for Telegram API calls.
+
+    Telegram allows ~30 messages per second globally, and ~1 message
+    per second per chat. This limiter handles the global limit.
+    """
+
     def __init__(self, rate=RATE_LIMIT_MESSAGES_PER_SECOND):
         self._rate = rate
         self._tokens = rate
@@ -39,10 +35,20 @@ class RateLimiter:
                 self._tokens -= 1
 
     async def send_message(self, bot, chat_id, text, **kwargs):
-        """Send a message with rate limiting applied."""
+        """Send a message with rate limiting applied.
+
+        Args:
+            bot: Telegram bot instance
+            chat_id: Target chat ID
+            text: Message text
+            **kwargs: Additional send_message kwargs
+
+        Returns:
+            The sent Message object
+        """
         await self.acquire()
         return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
 
 
-# Global instance
+# Global rate limiter instance
 rate_limiter = RateLimiter()

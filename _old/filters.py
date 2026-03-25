@@ -1,29 +1,12 @@
-"""Market filters — news blackout, session check, market hours.
-
-Ported from _old/filters.py with async support and modular config.
-"""
-
 import time
 import asyncio
 import aiohttp
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
-
-# ── Configuration ──
-USE_NEWS_FILTER = True
-NEWS_IMPACT = ["High", "Medium"]
-NEWS_CACHE_TTL = 3600   # seconds
-NEWS_BLACKOUT_MINUTES = 30
-
-# Crypto/synthetic keywords that are always open (no forex market hours)
-ALWAYS_OPEN_KEYS = [
-    "BTC", "ETH", "SOL", "USDT", "R_",
-    "V75", "V10", "V25", "V50", "V100",
-    "1HZ", "BOOM", "CRASH", "JUMP", "STEP",
-]
+from config import (
+    USE_NEWS_FILTER, NEWS_IMPACT, NEWS_CACHE_TTL, NEWS_BLACKOUT_MINUTES,
+    ALWAYS_OPEN_KEYS, logger,
+)
 
 # Module-level state
 _NEWS_CACHE = []
@@ -32,12 +15,13 @@ _news_lock = asyncio.Lock()
 
 
 async def fetch_forex_news():
-    """Fetch forex news events from ForexFactory calendar (async, cached)."""
+    """Fetch forex news events from calendar (async). Cached for NEWS_CACHE_TTL seconds."""
     global _NEWS_CACHE, _LAST_NEWS_FETCH
     if time.time() - _LAST_NEWS_FETCH < NEWS_CACHE_TTL:
         return
 
     async with _news_lock:
+        # Double-check after acquiring lock
         if time.time() - _LAST_NEWS_FETCH < NEWS_CACHE_TTL:
             return
 
@@ -73,6 +57,7 @@ async def fetch_forex_news():
                         except ValueError:
                             continue
                     if dt_obj is None:
+                        logger.warning("Unparseable news date: %s", dt_str)
                         continue
                     events.append({"currency": currency, "time": dt_obj})
 
@@ -84,9 +69,10 @@ async def fetch_forex_news():
 
 
 async def is_news_blackout(pair):
-    """Check if a pair is within a news blackout window."""
+    """Check if a pair is within a news blackout window (async)."""
     if not USE_NEWS_FILTER:
         return False
+    # Crypto and synthetics are unaffected by forex news
     if any(k in pair.upper() for k in ALWAYS_OPEN_KEYS):
         return False
     await fetch_forex_news()
@@ -101,6 +87,7 @@ async def is_news_blackout(pair):
     for event in _NEWS_CACHE:
         if event['currency'] in currencies:
             event_time = event['time']
+            # Ensure timezone-aware comparison
             if event_time.tzinfo is None:
                 event_time = event_time.replace(tzinfo=timezone.utc)
             diff = (event_time - now).total_seconds() / 60
@@ -112,7 +99,9 @@ async def is_news_blackout(pair):
 def is_in_session(session_type):
     """Check if current time is within the specified trading session.
 
-    London: 07:00-16:00 UTC | NY: 12:00-21:00 UTC | BOTH: always True
+    Session boundaries use exclusive end (< not <=) for consistency:
+      London: 07:00-16:00 UTC (opens 1h before official to catch pre-market)
+      NY: 12:00-21:00 UTC (opens 1h before official to catch pre-market)
     """
     now_hour = datetime.now(timezone.utc).hour
     if session_type == "LONDON":
