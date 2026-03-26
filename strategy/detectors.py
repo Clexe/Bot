@@ -99,7 +99,13 @@ async def detect_liquidity_sweep(candles: list, session_levels: dict) -> dict:
 
 
 async def detect_structure_shift(candles: list) -> dict:
-    """Detect CHoCH or BOS with displacement evidence and FVG on same move."""
+    """Detect CHoCH or BOS with displacement evidence and FVG on same move.
+
+    Checks the last 3 candles (not just the very last one) so a breakout
+    that occurred 1-2 bars ago is still detected.  The original code only
+    checked candles[-1] which meant a Daily MSS was only visible for a
+    single day, and an M15 shift was only visible for one 15-min bar.
+    """
     if len(candles) < 5:
         return {"confirmed": False, "type": None}
 
@@ -114,29 +120,34 @@ async def detect_structure_shift(candles: list) -> dict:
     if not swing_highs or not swing_lows:
         return {"confirmed": False, "type": None}
 
-    last = candles[-1]
     prev_high = swing_highs[-1][1]
     prev_low = swing_lows[-1][1]
 
-    body_size = abs(last["close"] - last["open"])
     avg_body = sum(abs(c["close"] - c["open"]) for c in candles[-10:-1]) / max(1, len(candles[-10:-1]))
-    has_displacement = body_size > avg_body * 1.5
 
-    if last["close"] > prev_high and has_displacement:
-        fvg = await detect_displacement_and_fvg(candles[-5:])
-        shift_type = "BOS" if len(swing_highs) >= 2 and swing_highs[-1][1] > swing_highs[-2][1] else "CHoCH"
-        return {
-            "confirmed": True, "type": shift_type, "direction": "LONG",
-            "break_level": prev_high, "fvg": fvg if fvg.get("found") else None,
-        }
+    # Check the last 3 candles for a structure break with displacement
+    for offset in range(min(3, len(candles))):
+        idx = len(candles) - 1 - offset
+        c = candles[idx]
 
-    if last["close"] < prev_low and has_displacement:
-        fvg = await detect_displacement_and_fvg(candles[-5:])
-        shift_type = "BOS" if len(swing_lows) >= 2 and swing_lows[-1][1] < swing_lows[-2][1] else "CHoCH"
-        return {
-            "confirmed": True, "type": shift_type, "direction": "SHORT",
-            "break_level": prev_low, "fvg": fvg if fvg.get("found") else None,
-        }
+        body_size = abs(c["close"] - c["open"])
+        has_displacement = body_size > avg_body * 1.2
+
+        if c["close"] > prev_high and has_displacement:
+            fvg = await detect_displacement_and_fvg(candles[max(0, idx - 2):min(len(candles), idx + 3)])
+            shift_type = "BOS" if len(swing_highs) >= 2 and swing_highs[-1][1] > swing_highs[-2][1] else "CHoCH"
+            return {
+                "confirmed": True, "type": shift_type, "direction": "LONG",
+                "break_level": prev_high, "fvg": fvg if fvg.get("found") else None,
+            }
+
+        if c["close"] < prev_low and has_displacement:
+            fvg = await detect_displacement_and_fvg(candles[max(0, idx - 2):min(len(candles), idx + 3)])
+            shift_type = "BOS" if len(swing_lows) >= 2 and swing_lows[-1][1] < swing_lows[-2][1] else "CHoCH"
+            return {
+                "confirmed": True, "type": shift_type, "direction": "SHORT",
+                "break_level": prev_low, "fvg": fvg if fvg.get("found") else None,
+            }
 
     return {"confirmed": False, "type": None}
 
