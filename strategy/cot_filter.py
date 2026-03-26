@@ -68,8 +68,8 @@ async def get_cot_bias(pair: str, db) -> dict:
             bias = cached["bias"]
             percentile = cached["percentile"]
         else:
-            logger.warning("COT fetch failed for %s and no cache available", pair)
-            return {"passed": False, "bias": "NEUTRAL", "percentile": 50, "reject_reason": "COT unavailable"}
+            logger.warning("COT fetch failed for %s and no cache available — passing with neutral bias", pair)
+            return {"passed": True, "bias": "NEUTRAL", "percentile": 50, "cot_unavailable": True}
     else:
         commercial_nets = []
         for row in data:
