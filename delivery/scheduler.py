@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import ALL_PAIRS, CRYPTO_PAIRS, FOREX_PAIRS
@@ -114,7 +115,24 @@ async def run_flow_scan(db, telegram, deriv_client, bybit_client):
 
 
 async def _fetch_candles(pair: str, deriv_client, bybit_client) -> dict:
-    """Fetch multi-timeframe candles for a pair from the appropriate feed."""
+    """Fetch multi-timeframe candles for a pair from the appropriate feed.
+
+    Wrapped in an overall timeout so a single slow pair cannot block an
+    entire scan cycle indefinitely (the root cause of run_flow_scan
+    reaching max running instances).
+    """
+    try:
+        return await asyncio.wait_for(
+            _fetch_candles_inner(pair, deriv_client, bybit_client),
+            timeout=120,
+        )
+    except asyncio.TimeoutError:
+        logger.error("Candle fetch timed out for %s after 120s", pair)
+        return {}
+
+
+async def _fetch_candles_inner(pair: str, deriv_client, bybit_client) -> dict:
+    """Inner implementation of candle fetching."""
     candles = {}
 
     try:
