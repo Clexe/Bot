@@ -1,3 +1,5 @@
+from datetime import datetime, timezone, timedelta
+from config import SIGNAL_MAX_AGE_HOURS
 from signals.formatter import format_cancel_message, format_update_message
 from utils.logger import get_logger
 
@@ -15,7 +17,29 @@ async def track_open_signals(db, current_prices: dict, telegram):
         "SELECT * FROM signals WHERE outcome IS NULL ORDER BY sent_at DESC"
     )
 
+    # Auto-expire signals older than SIGNAL_MAX_AGE_HOURS
+    now_utc = datetime.now(timezone.utc)
+    max_age = timedelta(hours=SIGNAL_MAX_AGE_HOURS)
+    active_signals = []
     for signal in open_signals:
+        sent_at = signal.get("sent_at")
+        if sent_at is not None:
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=timezone.utc)
+            if now_utc - sent_at > max_age:
+                try:
+                    await db.execute(
+                        "UPDATE signals SET outcome='EXPIRED', outcome_recorded_at=NOW() WHERE id=%s",
+                        (signal["id"],),
+                    )
+                    logger.info("Signal #%d %s %s auto-expired after %dh",
+                                signal["id"], signal["direction"], signal["pair"], SIGNAL_MAX_AGE_HOURS)
+                except Exception as e:
+                    logger.error("Failed to expire signal %s: %s", signal["id"], e)
+                continue
+        active_signals.append(signal)
+
+    for signal in active_signals:
         pair = signal["pair"]
         price = current_prices.get(pair)
         if price is None:

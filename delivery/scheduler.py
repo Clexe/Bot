@@ -38,18 +38,24 @@ async def run_precision_scan(db, telegram, deriv_client, bybit_client):
     """Precision scan: runs every 15 minutes during Kill Zones."""
     logger.info("Running Precision scan cycle")
 
+    stats = {"scanned": 0, "no_candles": 0, "rejected": 0, "no_signal": 0, "sent": 0, "errors": 0}
+
     for pair in ALL_PAIRS:
         try:
+            stats["scanned"] += 1
             candles = await _fetch_candles(pair, deriv_client, bybit_client)
             if not candles:
+                stats["no_candles"] += 1
                 continue
 
             result = await run_precision_pipeline(pair, candles, db)
             if result.get("status") != "passed":
+                stats["rejected"] += 1
                 continue
 
             signal = await generate_signal(result, db)
             if not signal:
+                stats["no_signal"] += 1
                 continue
 
             rationale = await generate_precision_rationale(signal)
@@ -61,9 +67,11 @@ async def run_precision_scan(db, telegram, deriv_client, bybit_client):
                     pass
 
             await telegram.deliver_signal(db, signal)
+            stats["sent"] += 1
             logger.info("Precision signal sent: %s %s score=%s/15", pair, signal["direction"], signal["score"])
 
         except Exception as e:
+            stats["errors"] += 1
             logger.error("Precision scan error for %s: %s", pair, e)
             try:
                 await db.execute(
@@ -73,23 +81,34 @@ async def run_precision_scan(db, telegram, deriv_client, bybit_client):
             except Exception:
                 pass
 
+    logger.info(
+        "Precision scan summary: %d scanned | %d sent | %d rejected | %d no_candles | %d no_signal | %d errors",
+        stats["scanned"], stats["sent"], stats["rejected"], stats["no_candles"], stats["no_signal"], stats["errors"],
+    )
+
 
 async def run_flow_scan(db, telegram, deriv_client, bybit_client):
     """Flow scan: runs every 5 minutes during Kill Zones (extended windows)."""
     logger.info("Running Flow scan cycle")
 
+    stats = {"scanned": 0, "no_candles": 0, "rejected": 0, "no_signal": 0, "sent": 0, "errors": 0}
+
     for pair in ALL_PAIRS:
         try:
+            stats["scanned"] += 1
             candles = await _fetch_candles(pair, deriv_client, bybit_client)
             if not candles:
+                stats["no_candles"] += 1
                 continue
 
             result = await run_flow_pipeline(pair, candles, db)
             if result.get("status") != "passed":
+                stats["rejected"] += 1
                 continue
 
             signal = await generate_signal(result, db)
             if not signal:
+                stats["no_signal"] += 1
                 continue
 
             rationale = await generate_flow_rationale(signal)
@@ -101,9 +120,11 @@ async def run_flow_scan(db, telegram, deriv_client, bybit_client):
                     pass
 
             await telegram.deliver_signal(db, signal)
+            stats["sent"] += 1
             logger.info("Flow signal sent: %s %s score=%s/8", pair, signal["direction"], signal["score"])
 
         except Exception as e:
+            stats["errors"] += 1
             logger.error("Flow scan error for %s: %s", pair, e)
             try:
                 await db.execute(
@@ -112,6 +133,11 @@ async def run_flow_scan(db, telegram, deriv_client, bybit_client):
                 )
             except Exception:
                 pass
+
+    logger.info(
+        "Flow scan summary: %d scanned | %d sent | %d rejected | %d no_candles | %d no_signal | %d errors",
+        stats["scanned"], stats["sent"], stats["rejected"], stats["no_candles"], stats["no_signal"], stats["errors"],
+    )
 
 
 async def _fetch_candles(pair: str, deriv_client, bybit_client) -> dict:
