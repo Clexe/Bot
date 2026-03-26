@@ -51,6 +51,7 @@ async def run_precision_scan(db, telegram, deriv_client, bybit_client):
             result = await run_precision_pipeline(pair, candles, db)
             if result.get("status") != "passed":
                 stats["rejected"] += 1
+                logger.info("Precision REJECTED %s: gate=%s reason=%s", pair, result.get("gate", "?"), result.get("reason", "?"))
                 continue
 
             signal = await generate_signal(result, db)
@@ -104,6 +105,7 @@ async def run_flow_scan(db, telegram, deriv_client, bybit_client):
             result = await run_flow_pipeline(pair, candles, db)
             if result.get("status") != "passed":
                 stats["rejected"] += 1
+                logger.info("Flow REJECTED %s: gate=%s reason=%s", pair, result.get("gate", "?"), result.get("reason", "?"))
                 continue
 
             signal = await generate_signal(result, db)
