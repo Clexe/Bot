@@ -179,11 +179,12 @@ async def _fetch_candles_inner(pair: str, deriv_client, bybit_client) -> dict:
                 ]
             candles["Daily"] = candles.get("D", [])
         else:
-            from config import TF_MAP_DERIV
+            from config import TF_MAP_DERIV, DERIV_SYMBOL_MAP
+            deriv_sym = DERIV_SYMBOL_MAP.get(pair, pair)
             for tf, granularity in TF_MAP_DERIV.items():
                 if tf in ("M1",):
                     continue
-                raw = await deriv_client.get_history(pair, granularity=granularity, count=100)
+                raw = await deriv_client.get_history(deriv_sym, granularity=granularity, count=100)
                 candles[tf] = [
                     {
                         "timestamp": c.get("epoch", 0),
