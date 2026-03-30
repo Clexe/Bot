@@ -74,7 +74,7 @@ PRECISION_TIER_RULES: Dict[str, dict] = {
 
 FLOW_TIER_RULES: Dict[str, dict] = {
     "free":  None,
-    "basic": {"min_score": 8, "delay_minutes": 0},
+    "basic": {"min_score": 6, "delay_minutes": 0},
     "pro":   {"min_score": 6, "delay_minutes": 0},
     "elite": {"min_score": 6, "delay_minutes": 0},
 }

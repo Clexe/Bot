@@ -63,9 +63,9 @@ async def run_flow_pipeline(pair: str, candles: dict, db) -> dict:
 
     direction = "LONG" if bias == "BULLISH" else "SHORT"
 
-    # ── GATE 2: H4 POI (accepts up to 2 wick touches) ──
+    # ── GATE 2: H4 POI (accepts up to 2 wick touches, must align with bias) ──
     h4_candles = candles.get("H4", [])
-    poi = await identify_poi_relaxed(h4_candles)
+    poi = await identify_poi_relaxed(h4_candles, direction=direction)
     if not poi["found"] or poi.get("touch_count", 0) > 2:
         await _log_rejection(db, pair, direction, 0, 2, "No valid H4 POI or POI too tested")
         return {"status": "rejected", "gate": 2, "reason": "No valid H4 POI"}
@@ -76,13 +76,22 @@ async def run_flow_pipeline(pair: str, candles: dict, db) -> dict:
         await _log_rejection(db, pair, direction, 0, 3, "Outside Flow Kill Zone")
         return {"status": "rejected", "gate": 3, "reason": "Outside Kill Zone"}
 
-    # ── GATE 4: M15 CHoCH with FVG ──
+    # ── GATE 4: M15 CHoCH with FVG (both must align with bias direction) ──
     m15_candles = candles.get("M15", [])
     choch = await detect_structure_shift(m15_candles)
     fvg = await detect_displacement_and_fvg(m15_candles)
-    if not choch["confirmed"] or not fvg.get("found"):
-        await _log_rejection(db, pair, direction, 0, 4, "No M15 CHoCH or FVG")
-        return {"status": "rejected", "gate": 4, "reason": "No M15 CHoCH or FVG"}
+
+    fvg_type_aligned = (
+        fvg.get("found") and (
+            (direction == "LONG" and fvg.get("type") == "bullish") or
+            (direction == "SHORT" and fvg.get("type") == "bearish")
+        )
+    )
+    choch_aligned = choch["confirmed"] and choch.get("direction") == direction
+
+    if not choch_aligned or not fvg_type_aligned:
+        await _log_rejection(db, pair, direction, 0, 4, "No M15 CHoCH or FVG aligned with bias")
+        return {"status": "rejected", "gate": 4, "reason": "No M15 CHoCH or FVG aligned with bias"}
 
     # ── GATE 5: R:R >= 1:2 ──
     entry_price = fvg["ce"] if fvg.get("found") else poi["price"]

@@ -196,8 +196,13 @@ async def get_daily_bias(candles_daily: list) -> str:
     return "NEUTRAL"
 
 
-async def identify_poi_relaxed(candles_h4: list) -> dict:
-    """Flow engine POI detection — accepts up to 2 wick touches."""
+async def identify_poi_relaxed(candles_h4: list, direction: str = None) -> dict:
+    """Flow engine POI detection — accepts up to 2 wick touches.
+
+    Only returns a POI that aligns with the given direction (LONG → bullish OB/FVG,
+    SHORT → bearish OB/FVG).  Passing direction=None falls back to the old
+    direction-blind behaviour (kept for any callers that don't have a bias yet).
+    """
     if len(candles_h4) < 5:
         return {"found": False}
 
@@ -210,6 +215,8 @@ async def identify_poi_relaxed(candles_h4: list) -> dict:
 
         # Bullish OB
         if c["close"] < c["open"] and next_c["close"] > next_c["open"] and next_c["close"] > prev_c["high"]:
+            if direction is not None and direction != "LONG":
+                continue
             ob_high = max(c["open"], c["close"])
             ob_low = min(c["open"], c["close"])
             ob_mid = (ob_high + ob_low) / 2
@@ -226,6 +233,8 @@ async def identify_poi_relaxed(candles_h4: list) -> dict:
 
         # Bearish OB
         if c["close"] > c["open"] and next_c["close"] < next_c["open"] and next_c["close"] < prev_c["low"]:
+            if direction is not None and direction != "SHORT":
+                continue
             ob_high = max(c["open"], c["close"])
             ob_low = min(c["open"], c["close"])
             ob_mid = (ob_high + ob_low) / 2
@@ -242,12 +251,14 @@ async def identify_poi_relaxed(candles_h4: list) -> dict:
 
     fvg = await detect_displacement_and_fvg(candles_h4[-10:])
     if fvg.get("found"):
-        return {
-            "found": True, "type": "FVG", "price": fvg["ce"],
-            "high": fvg["high"], "low": fvg["low"],
-            "touch_count": 0,
-            "direction": "LONG" if fvg["type"] == "bullish" else "SHORT",
-        }
+        fvg_direction = "LONG" if fvg["type"] == "bullish" else "SHORT"
+        if direction is None or fvg_direction == direction:
+            return {
+                "found": True, "type": "FVG", "price": fvg["ce"],
+                "high": fvg["high"], "low": fvg["low"],
+                "touch_count": 0,
+                "direction": fvg_direction,
+            }
 
     return {"found": False}
 
