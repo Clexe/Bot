@@ -165,7 +165,7 @@ async def _fetch_candles_inner(pair: str, deriv_client, bybit_client) -> dict:
 
     try:
         if pair in CRYPTO_PAIRS:
-            for tf in ("D", "H4", "H1", "M15", "M5"):
+            for tf in ("M", "W", "D", "H4", "H1", "M15", "M5"):
                 data = await bybit_client.get_kline(pair, tf, limit=100)
                 result_list = data.get("result", {}).get("list", [])
                 candles[tf] = [
