@@ -79,7 +79,14 @@ class DerivClient:
             "count": count,
         }
         result = await self._request(payload)
-        return result.get("candles", [])
+        if "error" in result:
+            logger.error("Deriv API error for %s (granularity=%s): %s",
+                         symbol, granularity, result["error"].get("message", result["error"]))
+            return []
+        candles = result.get("candles", [])
+        if not candles:
+            logger.warning("Deriv returned 0 candles for %s granularity=%s", symbol, granularity)
+        return candles
 
     async def subscribe_candles(self):
         """Subscribe to real-time candles for configured forex pairs."""

@@ -101,10 +101,9 @@ async def detect_liquidity_sweep(candles: list, session_levels: dict) -> dict:
 async def detect_structure_shift(candles: list) -> dict:
     """Detect CHoCH or BOS with displacement evidence and FVG on same move.
 
-    Checks the last 3 candles (not just the very last one) so a breakout
-    that occurred 1-2 bars ago is still detected.  The original code only
-    checked candles[-1] which meant a Daily MSS was only visible for a
-    single day, and an M15 shift was only visible for one 15-min bar.
+    Checks the last 5 candles so a breakout that occurred a few bars ago
+    is still detected.  Displacement threshold is 0.8x average body to
+    avoid rejecting legitimate structure shifts in low-volatility markets.
     """
     if len(candles) < 5:
         return {"confirmed": False, "type": None}
@@ -125,13 +124,13 @@ async def detect_structure_shift(candles: list) -> dict:
 
     avg_body = sum(abs(c["close"] - c["open"]) for c in candles[-10:-1]) / max(1, len(candles[-10:-1]))
 
-    # Check the last 3 candles for a structure break with displacement
-    for offset in range(min(3, len(candles))):
+    # Check the last 5 candles for a structure break with displacement
+    for offset in range(min(5, len(candles))):
         idx = len(candles) - 1 - offset
         c = candles[idx]
 
         body_size = abs(c["close"] - c["open"])
-        has_displacement = body_size > avg_body * 1.2
+        has_displacement = body_size > avg_body * 0.8
 
         if c["close"] > prev_high and has_displacement:
             fvg = await detect_displacement_and_fvg(candles[max(0, idx - 2):min(len(candles), idx + 3)])
@@ -177,21 +176,42 @@ async def detect_kill_zone(current_time_utc) -> dict:
 
 
 async def get_daily_bias(candles_daily: list) -> str:
-    """Simplified Daily bias for Flow engine. Returns BULLISH/BEARISH/NEUTRAL."""
-    if len(candles_daily) < 5:
+    """Simplified Daily bias for Flow engine. Returns BULLISH/BEARISH/NEUTRAL.
+
+    Uses a point system so either condition alone can establish bias:
+      +1 point for candle direction majority (3/5 or 2/3 days)
+      +1 point for close above/below moving average
+    1+ points in the same direction = directional bias.
+    """
+    if len(candles_daily) < 3:
         return "NEUTRAL"
 
-    recent = candles_daily[-5:]
+    recent = candles_daily[-5:] if len(candles_daily) >= 5 else candles_daily[-3:]
     up_days = sum(1 for c in recent if c["close"] > c["open"])
     down_days = sum(1 for c in recent if c["close"] < c["open"])
 
-    closes = [c["close"] for c in candles_daily[-20:]]
-    ma_20 = sum(closes) / len(closes)
-    last_close = recent[-1]["close"]
+    bull_pts = 0
+    bear_pts = 0
 
-    if up_days >= 3 and last_close > ma_20:
+    threshold = max(2, len(recent) // 2 + 1)
+    if up_days >= threshold:
+        bull_pts += 1
+    if down_days >= threshold:
+        bear_pts += 1
+
+    if len(candles_daily) >= 10:
+        lookback = min(20, len(candles_daily))
+        closes = [c["close"] for c in candles_daily[-lookback:]]
+        ma = sum(closes) / len(closes)
+        last_close = recent[-1]["close"]
+        if last_close > ma:
+            bull_pts += 1
+        elif last_close < ma:
+            bear_pts += 1
+
+    if bull_pts >= 1 and bull_pts > bear_pts:
         return "BULLISH"
-    elif down_days >= 3 and last_close < ma_20:
+    elif bear_pts >= 1 and bear_pts > bull_pts:
         return "BEARISH"
     return "NEUTRAL"
 

@@ -178,11 +178,13 @@ async def _fetch_candles_inner(pair: str, deriv_client, bybit_client) -> dict:
                     for c in reversed(result_list)
                 ]
             candles["Daily"] = candles.get("D", [])
+            logger.info("Candle fetch %s (Bybit): %s",
+                        pair, {tf: len(v) for tf, v in candles.items()})
         else:
             from config import TF_MAP_DERIV, DERIV_SYMBOL_MAP
             deriv_sym = DERIV_SYMBOL_MAP.get(pair, pair)
             for tf, granularity in TF_MAP_DERIV.items():
-                if tf in ("M1",):
+                if tf in ("M1", "W", "M"):
                     continue
                 raw = await deriv_client.get_history(deriv_sym, granularity=granularity, count=100)
                 candles[tf] = [
@@ -194,6 +196,11 @@ async def _fetch_candles_inner(pair: str, deriv_client, bybit_client) -> dict:
                     for c in raw
                 ]
             candles["Daily"] = candles.get("D", [])
+            total = sum(len(v) for v in candles.values())
+            logger.info("Candle fetch %s (%s): %s | total=%d",
+                        pair, deriv_sym,
+                        {tf: len(v) for tf, v in candles.items()},
+                        total)
     except Exception as e:
         logger.error("Failed to fetch candles for %s: %s", pair, e)
         return {}
