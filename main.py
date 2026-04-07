@@ -4,7 +4,7 @@ from aiohttp import web
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from config import (
     DATABASE_URL, TELEGRAM_BOT_TOKEN, DERIV_APP_ID,
-    FOREX_PAIRS, CRYPTO_PAIRS,
+    FOREX_PAIRS, CRYPTO_PAIRS, DERIV_SYMBOL_MAP,
 )
 from database.db import Database
 from database.schema import initialize_schema
@@ -51,7 +51,8 @@ async def tracking_job(db, telegram, deriv_client, bybit_client):
 
         for pair in FOREX_PAIRS:
             try:
-                raw = await deriv_client.get_history(pair, granularity=60, count=1)
+                deriv_sym = DERIV_SYMBOL_MAP.get(pair, pair)
+                raw = await deriv_client.get_history(deriv_sym, granularity=60, count=1)
                 if raw:
                     current_prices[pair] = float(raw[-1].get("close", 0))
             except Exception:
