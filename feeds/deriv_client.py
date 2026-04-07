@@ -1,5 +1,5 @@
 import asyncio, json, websockets
-from config import DERIV_WS_URL, FOREX_PAIRS
+from config import DERIV_WS_URL, FOREX_PAIRS, DERIV_SYMBOL_MAP
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -74,6 +74,7 @@ class DerivClient:
         """Fetch historical candles using ticks_history request."""
         payload = {
             "ticks_history": symbol,
+            "end": "latest",
             "style": "candles",
             "granularity": granularity,
             "count": count,
@@ -91,8 +92,10 @@ class DerivClient:
     async def subscribe_candles(self):
         """Subscribe to real-time candles for configured forex pairs."""
         for pair in FOREX_PAIRS:
+            deriv_sym = DERIV_SYMBOL_MAP.get(pair, pair)
             payload = {
-                "ticks_history": pair,
+                "ticks_history": deriv_sym,
+                "end": "latest",
                 "style": "candles",
                 "granularity": 60,
                 "subscribe": 1,
