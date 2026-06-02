@@ -189,9 +189,61 @@ R:R: 1:3.0
 Session: London
 ```
 
+## Why We Rebuilt — Problems With the Old Bot
+
+The previous bot (dual-engine: Precision 15-point / Flow 8-point) stopped producing signals entirely after February 26, 2026. A full investigation uncovered multiple compounding failures:
+
+### 1. WebSocket Concurrency Race Condition
+
+The `DerivClient` shared a single WebSocket connection across 3+ concurrent APScheduler jobs (`tracking_job`, `precision_scan`, `flow_scan`) with no synchronization. When multiple coroutines called `ws.recv()` simultaneously, one would steal another's response, causing:
+
+- `"cannot call recv while another coroutine is already waiting"` errors
+- `run_flow_scan` permanently hanging — it never completed a single run after the bug triggered
+- APScheduler logging `"maximum number of running instances reached"` every 5 minutes indefinitely
+
+**Impact**: Flow engine was 100% dead. No Flow signals could ever be generated.
+
+### 2. Structure Shift Detection Too Narrow
+
+`detect_structure_shift()` only checked `candles[-1]` (the very last candle) for CHoCH/BOS breakouts, with a 1.5x displacement threshold. This meant:
+
+- On the **Daily timeframe** (Precision Gate 2), a structure break was only detectable on the exact day it happened — a single 24-hour window
+- On **M15** (Flow Gate 4, Precision Gate 6), a CHoCH was only visible for one 15-minute bar
+- Combined with the WebSocket bug corrupting data fetches, the detection window was effectively zero
+
+**Impact**: Both Precision and Flow pipelines were blocked at their MSS/CHoCH gates. Even when the WebSocket worked, signals couldn't pass through.
+
+### 3. COT Data Fetch Failing for XAUUSD
+
+The CFTC COT API was returning errors/empty data for gold (contract 088691), and the `cot_cache` database table had no fallback data. Since COT alignment was Gate 1 of the Precision pipeline for XAUUSD, this pair was hard-blocked from ever generating a signal.
+
+### 4. Overly Complex Pipeline
+
+The old bot required signals to pass through 7 sequential gates (Precision) or 5 gates (Flow), each with strict thresholds. With multiple gates silently failing due to the bugs above, the compounding rejection rate was 100%. The complexity made it difficult to diagnose which gate was actually blocking signals.
+
+### Fixes Applied (Before Rebuild)
+
+| Fix | Commit |
+|-----|--------|
+| Added `asyncio.Lock` to serialize WebSocket requests, 15s recv timeout, 120s per-pair fetch timeout | `9d3b9b7` |
+| Changed structure shift detection to check last 3 candles, lowered displacement threshold to 1.2x | `7476b77` |
+
+These fixes would have restored signal generation, but the decision was made to rebuild the bot with a simpler, more mechanical strategy rather than patch the old architecture.
+
+### Deployment Failure (Vercel)
+
+An attempt to deploy on Vercel failed with `"No python entrypoint found"`. The real issue was architectural — Vercel is serverless (max 10-60s execution per request), but this bot requires:
+
+- Persistent WebSocket connections (Deriv + Bybit feeds, open 24/7)
+- Background scheduler jobs running every 1-15 minutes
+- Telegram long-polling loop
+- Persistent database connection pool
+
+None of these work in a serverless environment. Railway is the correct platform.
+
 ## What Changed (Full Rebuild)
 
-The previous bot used a dual-engine architecture (Precision 15-point / Flow 8-point) with COT data, Wyckoff phases, Volume Profile, and intermarket correlation. It was deleted and rebuilt from scratch with this simplified, mechanical BOS-based strategy:
+The old bot was deleted and rebuilt from scratch with a simplified, mechanical BOS-based strategy:
 
 | Old Bot | New Bot |
 |---------|---------|
@@ -202,3 +254,5 @@ The previous bot used a dual-engine architecture (Precision 15-point / Flow 8-po
 | AI rationale via DeepSeek | Removed |
 | Payment/subscription tiers | Removed |
 | 6 scheduler jobs | 2 jobs (scan + tracker) |
+| No WebSocket locking | asyncio.Lock from day one |
+| Structure shift checked 1 candle | Detectors check last 3 candles |
