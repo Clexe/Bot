@@ -65,15 +65,20 @@ A background job runs every 1 minute to check open signals against current price
 
 ```
 Bot/
-├── main.py                    # Entry point, wires everything together
+├── vercel.json                # Cron schedules + function config
 ├── config.py                  # Pairs, timeframes, kill zones, risk params
 ├── requirements.txt
-├── Procfile                   # Railway deployment
-├── railway.json               # Railway config (auto-restart on failure)
+│
+├── api/                       # Vercel serverless endpoints
+│   ├── scan.py                # GET /api/scan — cron-triggered scan (every 15 min)
+│   ├── track.py               # GET /api/track — cron-triggered signal tracker (every 1 min)
+│   ├── webhook.py             # POST /api/webhook — Telegram webhook handler
+│   ├── health.py              # GET /api/health — health check
+│   └── setup.py               # GET /api/setup — one-time Telegram webhook + DB init
 │
 ├── feeds/
-│   ├── deriv_client.py        # Deriv WebSocket client (forex: EURUSD, GBPUSD, XAUUSD, GBPJPY)
-│   └── bybit_client.py        # Bybit REST client (crypto: BTCUSDT)
+│   ├── deriv_client.py        # Ephemeral Deriv WebSocket client (forex)
+│   └── bybit_client.py        # Bybit REST client (crypto)
 │
 ├── strategy/
 │   ├── bias.py                # HTF bias computation (daily + weekly BOS)
@@ -87,11 +92,11 @@ Bot/
 │   └── tracker.py             # Open signal monitoring (SL/TP hit tracking)
 │
 ├── delivery/
-│   ├── telegram_bot.py        # Telegram bot (polling, commands, signal delivery)
-│   └── scheduler.py           # APScheduler jobs, candle fetching, scan orchestration
+│   ├── telegram.py            # Direct Telegram Bot API client (HTTP, no polling)
+│   └── scan.py                # Core scan cycle logic
 │
 ├── database/
-│   ├── db.py                  # asyncpg connection pool
+│   ├── db.py                  # ServerlessDB — single asyncpg connection wrapper
 │   └── schema.py              # Table definitions (signals, daily_stats, errors, bot_settings)
 │
 └── utils/
@@ -130,7 +135,7 @@ Bot/
 | `BYBIT_API_KEY` | No | Bybit API key (for BTCUSDT) |
 | `BYBIT_API_SECRET` | No | Bybit API secret |
 | `ADMIN_CHAT_IDS` | No | Comma-separated Telegram user IDs for admin access |
-| `PORT` | No | Health server port (default: 8080) |
+| `CRON_SECRET` | Yes | Vercel cron secret (auto-set by Vercel, used to verify cron requests) |
 
 ## Active Pairs
 
@@ -144,14 +149,26 @@ Bot/
 
 > **US30**: Not yet active. Add the correct symbol to `DERIV_PAIRS` or `BYBIT_PAIRS` in `config.py` once confirmed with your feed provider.
 
-## Deployment (Railway)
+## Deployment (Vercel)
 
-1. Push to your Railway-connected branch
-2. Set all required environment variables in Railway dashboard
-3. Railway auto-detects `Procfile` and runs `python main.py`
-4. Bot starts, connects to Deriv/Bybit/Telegram/PostgreSQL, and begins scanning
+**Requires Vercel Pro plan** for cron jobs (every 1-15 min) and 300s function timeout.
 
-The `railway.json` configures auto-restart on failure with up to 10 retries.
+1. Connect your GitHub repo to Vercel
+2. Set all required environment variables in Vercel dashboard
+3. Deploy — Vercel auto-detects `api/` serverless functions and `vercel.json` cron config
+4. After first deploy, hit `/api/setup` once to register the Telegram webhook and create DB tables
+5. Cron jobs start automatically: scan every 15 min, tracker every 1 min
+
+### How it works (serverless)
+
+Each cron trigger is a fresh function invocation:
+1. Opens a Deriv WebSocket connection
+2. Fetches candles for all pairs
+3. Runs the full scan pipeline
+4. Sends signals via Telegram HTTP API
+5. Closes all connections
+
+No persistent state between invocations — every run is independent.
 
 ## Database Tables
 
@@ -230,20 +247,13 @@ The old bot required signals to pass through 7 sequential gates (Precision) or 5
 
 These fixes would have restored signal generation, but the decision was made to rebuild the bot with a simpler, more mechanical strategy rather than patch the old architecture.
 
-### Deployment Failure (Vercel)
+### Initial Deployment Failure (Vercel)
 
-An attempt to deploy on Vercel failed with `"No python entrypoint found"`. The real issue was architectural — Vercel is serverless (max 10-60s execution per request), but this bot requires:
-
-- Persistent WebSocket connections (Deriv + Bybit feeds, open 24/7)
-- Background scheduler jobs running every 1-15 minutes
-- Telegram long-polling loop
-- Persistent database connection pool
-
-None of these work in a serverless environment. Railway is the correct platform.
+The first Vercel attempt failed with `"No python entrypoint found"` because the old bot was a long-running process (`main.py` with APScheduler + Telegram polling). The rebuild restructures everything as serverless functions with Vercel cron triggers, ephemeral connections, and Telegram webhooks — solving the architectural mismatch.
 
 ## What Changed (Full Rebuild)
 
-The old bot was deleted and rebuilt from scratch with a simplified, mechanical BOS-based strategy:
+The old bot was deleted and rebuilt from scratch with a simplified, mechanical BOS-based strategy and serverless architecture:
 
 | Old Bot | New Bot |
 |---------|---------|
@@ -253,6 +263,8 @@ The old bot was deleted and rebuilt from scratch with a simplified, mechanical B
 | Kill zones optional (24/7 scanning) | Kill zones enforced (London + NY only) |
 | AI rationale via DeepSeek | Removed |
 | Payment/subscription tiers | Removed |
-| 6 scheduler jobs | 2 jobs (scan + tracker) |
-| No WebSocket locking | asyncio.Lock from day one |
-| Structure shift checked 1 candle | Detectors check last 3 candles |
+| Long-running process (Railway) | Serverless functions (Vercel) |
+| APScheduler (6 jobs) | Vercel cron (2 endpoints) |
+| Telegram long-polling | Telegram webhooks |
+| Persistent WebSocket + DB pool | Ephemeral connections per invocation |
+| `python-telegram-bot` + `apscheduler` | Direct HTTP calls, 3 deps total |

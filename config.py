@@ -9,6 +9,7 @@ DERIV_APP_ID = os.getenv("DERIV_APP_ID", "")
 DERIV_WS_URL = os.getenv("DERIV_WS_URL", "wss://ws.derivws.com/websockets/v3")
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 DERIV_PAIRS = ["frxEURUSD", "frxGBPUSD", "frxXAUUSD", "frxGBPJPY"]
 BYBIT_PAIRS = ["BTCUSDT"]
@@ -53,5 +54,4 @@ KILL_ZONES = [
     {"name": "New York", "start": time(12, 0), "end": time(17, 0)},
 ]
 
-SCAN_INTERVAL_MINUTES = 15
 DUPLICATE_PREVENTION_HOURS = 4

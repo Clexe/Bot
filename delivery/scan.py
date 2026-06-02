@@ -1,6 +1,5 @@
 import asyncio
 from datetime import datetime, timedelta
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import (
     ALL_PAIRS, DERIV_PAIRS, BYBIT_PAIRS,
@@ -12,7 +11,7 @@ from strategy.levels import map_key_levels
 from strategy.setups import scan_setups
 from strategy.execution import compute_trade
 from signals.generator import create_signal, format_signal
-from signals.tracker import track_open_signals, get_daily_losses
+from signals.tracker import get_daily_losses
 from utils.helpers import in_kill_zone
 from utils.logger import get_logger
 
@@ -20,10 +19,10 @@ logger = get_logger(__name__)
 
 
 async def run_scan(db, telegram, deriv_client, bybit_client):
-    """Main scan cycle — runs every 15 min, only inside kill zones."""
+    """Core scan cycle — called by the Vercel cron handler."""
     kz = in_kill_zone()
     if not kz["active"]:
-        return
+        return {"status": "skipped", "reason": "outside kill zone", "session": kz["session"]}
 
     session = kz["session"]
     logger.info("Scan cycle — %s session", session)
@@ -31,7 +30,9 @@ async def run_scan(db, telegram, deriv_client, bybit_client):
     losses = await get_daily_losses(db)
     if losses >= MAX_DAILY_LOSSES:
         logger.info("Daily loss limit reached (%d). Skipping.", losses)
-        return
+        return {"status": "skipped", "reason": "daily loss limit"}
+
+    signals_sent = 0
 
     for pair in ALL_PAIRS:
         try:
@@ -76,6 +77,7 @@ async def run_scan(db, telegram, deriv_client, bybit_client):
                        DO UPDATE SET signals_sent = daily_stats.signals_sent + 1"""
                 )
 
+                signals_sent += 1
                 display = PAIR_DISPLAY.get(pair, pair)
                 logger.info("Signal: %s %s %s R:R 1:%.1f",
                             display, setup["direction"], setup["setup_type"], trade["rr"])
@@ -90,12 +92,7 @@ async def run_scan(db, telegram, deriv_client, bybit_client):
             except Exception:
                 pass
 
-
-async def run_tracker(db, deriv_client, bybit_client):
-    try:
-        await track_open_signals(db, deriv_client, bybit_client)
-    except Exception as e:
-        logger.error("Tracker error: %s", e)
+    return {"status": "completed", "session": session, "signals_sent": signals_sent}
 
 
 async def _fetch_candles(pair, deriv_client, bybit_client):
@@ -149,7 +146,3 @@ async def _is_duplicate(db, pair, direction):
         pair, direction, cutoff,
     )
     return row is not None
-
-
-def make_scheduler():
-    return AsyncIOScheduler()
