@@ -19,9 +19,14 @@ class handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-        result = asyncio.run(_setup())
+        try:
+            result = asyncio.run(_setup())
+            status = 200
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+            status = 500
 
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(result).encode())
@@ -29,23 +34,30 @@ class handler(BaseHTTPRequestHandler):
 
 async def _setup():
     import asyncpg
-    from config import DATABASE_URL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+    from config import DATABASE_URL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_WEBHOOK_SECRET
     from database.db import ServerlessDB
     from database.schema import init_schema
     from delivery.telegram import TelegramClient
 
     result = {}
 
-    # Telegram webhook
-    vercel_url = os.getenv("VERCEL_URL", "")
-    tg = TelegramClient(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
-    if vercel_url:
-        webhook_url = f"https://{vercel_url}/api/webhook"
-        result["webhook"] = await tg.set_webhook(webhook_url)
-    else:
-        result["webhook"] = {"error": "VERCEL_URL not set"}
+    # Prefer an explicit production URL — VERCEL_URL points at the
+    # deployment-specific URL (e.g. preview), not the stable domain.
+    base_url = (
+        os.getenv("WEBHOOK_BASE_URL")
+        or os.getenv("VERCEL_PROJECT_PRODUCTION_URL")
+        or os.getenv("VERCEL_URL", "")
+    )
 
-    # Database schema
+    tg = TelegramClient(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
+    if base_url:
+        base_url = base_url.replace("https://", "").replace("http://", "").rstrip("/")
+        webhook_url = f"https://{base_url}/api/webhook"
+        result["webhook"] = await tg.set_webhook(webhook_url, secret_token=TELEGRAM_WEBHOOK_SECRET)
+        result["webhook_url"] = webhook_url
+    else:
+        result["webhook"] = {"error": "no base URL found — set WEBHOOK_BASE_URL"}
+
     try:
         conn = await asyncpg.connect(DATABASE_URL)
         db = ServerlessDB(conn)

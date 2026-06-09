@@ -17,15 +17,28 @@ class handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-        result = asyncio.run(_run())
+        try:
+            result = asyncio.run(_run())
+            status = 200
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+            status = 500
 
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(result).encode())
 
 
 async def _run():
+    from utils.helpers import in_kill_zone
+
+    # Check kill zone before opening any connections — the cron fires
+    # 24/7 but we only trade London and New York sessions.
+    kz = in_kill_zone()
+    if not kz["active"]:
+        return {"status": "skipped", "reason": "outside kill zone", "session": kz["session"]}
+
     import asyncpg
     from config import DATABASE_URL, DERIV_APP_ID, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
     from database.db import ServerlessDB
@@ -37,8 +50,7 @@ async def _run():
 
     conn = await asyncpg.connect(DATABASE_URL)
     db = ServerlessDB(conn)
-    deriv = DerivClient(DERIV_APP_ID)
-    await deriv.connect()
+    deriv = DerivClient(DERIV_APP_ID)  # connects lazily on first request
     bybit = BybitClient()
     telegram = TelegramClient(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
 

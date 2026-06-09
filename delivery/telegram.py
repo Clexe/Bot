@@ -29,8 +29,11 @@ class TelegramClient:
         except Exception as e:
             logger.error("Telegram send error: %s", e)
 
-    async def set_webhook(self, webhook_url: str) -> dict:
+    async def set_webhook(self, webhook_url: str, secret_token: str = "") -> dict:
         url = f"{TELEGRAM_API}/bot{self.token}/setWebhook"
+        payload = {"url": webhook_url}
+        if secret_token:
+            payload["secret_token"] = secret_token
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json={"url": webhook_url}) as resp:
+            async with session.post(url, json=payload) as resp:
                 return await resp.json()

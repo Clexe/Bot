@@ -136,6 +136,8 @@ Bot/
 | `BYBIT_API_SECRET` | No | Bybit API secret |
 | `ADMIN_CHAT_IDS` | No | Comma-separated Telegram user IDs for admin access |
 | `CRON_SECRET` | Yes | Vercel cron secret (auto-set by Vercel, used to verify cron requests) |
+| `TELEGRAM_WEBHOOK_SECRET` | Recommended | Secret token to authenticate Telegram webhook calls |
+| `WEBHOOK_BASE_URL` | No | Override for the webhook domain (defaults to the Vercel production URL) |
 
 ## Active Pairs
 

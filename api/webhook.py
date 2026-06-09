@@ -9,11 +9,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
-        update = json.loads(body)
+        from config import TELEGRAM_WEBHOOK_SECRET
 
-        asyncio.run(_handle_update(update))
+        # Telegram echoes back the secret_token registered via setWebhook,
+        # so unauthenticated POSTs to this endpoint are rejected.
+        if TELEGRAM_WEBHOOK_SECRET:
+            token = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if token != TELEGRAM_WEBHOOK_SECRET:
+                self.send_response(403)
+                self.end_headers()
+                return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            update = json.loads(body)
+            asyncio.run(_handle_update(update))
+        except Exception:
+            # Always ACK so Telegram doesn't retry a poison update forever.
+            pass
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -33,13 +47,15 @@ async def _handle_update(update):
 
     tg = TelegramClient(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
 
-    if text == "/start":
+    command = text.split("@")[0].strip()
+
+    if command == "/start":
         await tg.send_message(
             chat_id,
             "Signalix Trading Bot\n\n/status - Bot status\n/pairs - Active pairs",
         )
-    elif text == "/status":
+    elif command == "/status":
         await tg.send_message(chat_id, "Bot is running on Vercel.")
-    elif text == "/pairs":
+    elif command == "/pairs":
         pairs = [PAIR_DISPLAY.get(p, p) for p in ALL_PAIRS]
         await tg.send_message(chat_id, "Active pairs:\n" + "\n".join(f"  {p}" for p in pairs))

@@ -10,6 +10,7 @@ DERIV_WS_URL = os.getenv("DERIV_WS_URL", "wss://ws.derivws.com/websockets/v3")
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 CRON_SECRET = os.getenv("CRON_SECRET", "")
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 
 DERIV_PAIRS = ["frxEURUSD", "frxGBPUSD", "frxXAUUSD", "frxGBPJPY"]
 BYBIT_PAIRS = ["BTCUSDT"]
